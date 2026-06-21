@@ -8,22 +8,25 @@ import (
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+
+	"github.com/cristianat98/Music-Contest-Telegram/internal/contest"
 )
 
-// App wires the Telegram bot client to the storage layer and holds the
-// runtime identity (own user ID, target chat ID) needed by middleware and
-// the tick-driven lifecycle engine added in later units.
+// App wires the Telegram bot client to the storage layer and the contest
+// lifecycle engine, and holds the runtime identity (own user ID, target
+// chat ID) needed by middleware and the tick-driven lifecycle engine.
 type App struct {
-	TG     *tgbot.Bot
-	DB     *sql.DB
-	ChatID int64
-	SelfID int64
+	TG      *tgbot.Bot
+	DB      *sql.DB
+	ChatID  int64
+	SelfID  int64
+	Contest *contest.Engine
 }
 
 // New creates the Telegram bot client, registers command handlers and the
 // chat_member default-handler dispatch, and resolves the bot's own user ID.
 func New(ctx context.Context, token string, chatID int64, db *sql.DB) (*App, error) {
-	app := &App{DB: db, ChatID: chatID}
+	app := &App{DB: db, ChatID: chatID, Contest: contest.NewEngine(db)}
 
 	opts := []tgbot.Option{
 		tgbot.WithDefaultHandler(app.defaultHandler),
@@ -54,6 +57,17 @@ func New(ctx context.Context, token string, chatID int64, db *sql.DB) (*App, err
 func (a *App) registerHandlers() {
 	a.TG.RegisterHandler(tgbot.HandlerTypeMessageText, "syncparticipants", tgbot.MatchTypeCommand,
 		AdminOnly(a, a.handleSyncParticipants))
+
+	a.TG.RegisterHandler(tgbot.HandlerTypeMessageText, "startcontest", tgbot.MatchTypeCommand,
+		AdminOnly(a, a.handleStartContest))
+	a.TG.RegisterHandler(tgbot.HandlerTypeMessageText, "finishcontest", tgbot.MatchTypeCommand,
+		AdminOnly(a, a.handleFinishContest))
+	a.TG.RegisterHandler(tgbot.HandlerTypeMessageText, "startweek", tgbot.MatchTypeCommand,
+		AdminOnly(a, a.handleStartWeek))
+	a.TG.RegisterHandler(tgbot.HandlerTypeMessageText, "modifylimit", tgbot.MatchTypeCommand,
+		AdminOnly(a, a.handleModifyLimit))
+	a.TG.RegisterHandler(tgbot.HandlerTypeMessageText, "forceadvance", tgbot.MatchTypeCommand,
+		AdminOnly(a, a.handleForceAdvance))
 }
 
 // Start begins long-polling for updates. It blocks until ctx is canceled.
