@@ -198,7 +198,8 @@ func TestForceAdvance_ConcurrentCallsCloseEachStateExactlyOnce(t *testing.T) {
 	seedTopic(t, db, "topic-a")
 
 	hooks := &countingHooks{}
-	e.SetHooks(hooks)
+	e.SetSongsHooks(hooks)
+	e.SetResultsHooks(hooks)
 
 	if _, err := e.StartContest(ctx, "Contest"); err != nil {
 		t.Fatalf("StartContest() error = %v", err)

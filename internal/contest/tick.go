@@ -34,9 +34,9 @@ func (e *Engine) Tick(ctx context.Context) error {
 	var complete bool
 	switch w.state {
 	case StateSongsCollection:
-		complete, err = e.hooks.SongsCollectionComplete(ctx, e.db, w.id)
+		complete, err = e.songsHooks.SongsCollectionComplete(ctx, e.db, w.id)
 	case StateResultsCollection:
-		complete, err = e.hooks.ResultsCollectionComplete(ctx, e.db, w.id)
+		complete, err = e.resultsHooks.ResultsCollectionComplete(ctx, e.db, w.id)
 	}
 	if err != nil {
 		return err
@@ -61,7 +61,7 @@ func (e *Engine) advance(ctx context.Context, w *week, forced bool) (string, err
 
 	switch w.state {
 	case StateSongsCollection:
-		if err := e.hooks.CloseSongsCollection(ctx, tx, w.id, forced); err != nil {
+		if err := e.songsHooks.CloseSongsCollection(ctx, tx, w.id, forced); err != nil {
 			return "", fmt.Errorf("contest: close songs_collection: %w", err)
 		}
 		now := time.Now().In(madridLocation)
@@ -71,7 +71,7 @@ func (e *Engine) advance(ctx context.Context, w *week, forced bool) (string, err
 			return "", fmt.Errorf("contest: transition to results_collection: %w", err)
 		}
 	case StateResultsCollection:
-		if err := e.hooks.CloseResultsCollection(ctx, tx, w.id, forced); err != nil {
+		if err := e.resultsHooks.CloseResultsCollection(ctx, tx, w.id, forced); err != nil {
 			return "", fmt.Errorf("contest: close results_collection: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `

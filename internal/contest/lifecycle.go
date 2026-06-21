@@ -26,41 +26,50 @@ var (
 	ErrWeekNotIdle       = errors.New("contest: the active week must be idle before finishing the contest")
 )
 
-// LifecycleHooks lets later units (U5 for songs_collection, U6 for
-// results_collection) plug their own strike, scoring, and outbox-publish
-// logic into the state machine that this unit owns, without this package
-// importing theirs. NewEngine defaults to noopHooks so this unit is fully
-// testable on its own; main.go (U7) wires the real implementations once
-// they exist.
-type LifecycleHooks interface {
+// SongsCollectionHooks lets U5 plug its strike and outbox-publish logic for
+// songs_collection into the state machine this unit owns, without this
+// package importing U5's. NewEngine defaults to a no-op implementation so
+// this unit is fully testable on its own; main.go (U7) wires the real
+// implementation once it exists.
+type SongsCollectionHooks interface {
 	// CloseSongsCollection runs inside the same transaction that transitions
 	// a week out of songs_collection, either naturally (every required
 	// participant submitted) or via /forceadvance (forced=true, meaning
 	// stragglers exist and must be struck per R20).
 	CloseSongsCollection(ctx context.Context, tx *sql.Tx, weekID int64, forced bool) error
 
+	// SongsCollectionComplete reports whether every required participant
+	// has submitted, used by Tick to detect a natural close (R19).
+	SongsCollectionComplete(ctx context.Context, db *sql.DB, weekID int64) (bool, error)
+}
+
+// ResultsCollectionHooks is SongsCollectionHooks' counterpart for U6.
+type ResultsCollectionHooks interface {
 	// CloseResultsCollection runs inside the same transaction that
 	// transitions a week out of results_collection back to idle, either
 	// naturally or via /forceadvance (R24-R28).
 	CloseResultsCollection(ctx context.Context, tx *sql.Tx, weekID int64, forced bool) error
-
-	// SongsCollectionComplete reports whether every required participant
-	// has submitted, used by Tick to detect a natural close (R19).
-	SongsCollectionComplete(ctx context.Context, db *sql.DB, weekID int64) (bool, error)
 
 	// ResultsCollectionComplete reports whether every required participant
 	// is done (ranking + questionnaire), used by Tick (R26).
 	ResultsCollectionComplete(ctx context.Context, db *sql.DB, weekID int64) (bool, error)
 }
 
-type noopHooks struct{}
+type noopSongsHooks struct{}
 
-func (noopHooks) CloseSongsCollection(context.Context, *sql.Tx, int64, bool) error   { return nil }
-func (noopHooks) CloseResultsCollection(context.Context, *sql.Tx, int64, bool) error { return nil }
-func (noopHooks) SongsCollectionComplete(context.Context, *sql.DB, int64) (bool, error) {
+func (noopSongsHooks) CloseSongsCollection(context.Context, *sql.Tx, int64, bool) error {
+	return nil
+}
+func (noopSongsHooks) SongsCollectionComplete(context.Context, *sql.DB, int64) (bool, error) {
 	return false, nil
 }
-func (noopHooks) ResultsCollectionComplete(context.Context, *sql.DB, int64) (bool, error) {
+
+type noopResultsHooks struct{}
+
+func (noopResultsHooks) CloseResultsCollection(context.Context, *sql.Tx, int64, bool) error {
+	return nil
+}
+func (noopResultsHooks) ResultsCollectionComplete(context.Context, *sql.DB, int64) (bool, error) {
 	return false, nil
 }
 
@@ -71,23 +80,32 @@ func (noopHooks) ResultsCollectionComplete(context.Context, *sql.DB, int64) (boo
 // flagged that the lock must cover the tick's own auto-transitions, not
 // just admin commands).
 type Engine struct {
-	db    *sql.DB
-	mu    sync.Mutex
-	hooks LifecycleHooks
+	db           *sql.DB
+	mu           sync.Mutex
+	songsHooks   SongsCollectionHooks
+	resultsHooks ResultsCollectionHooks
 }
 
 func NewEngine(db *sql.DB) *Engine {
 	return &Engine{
-		db:    db,
-		hooks: noopHooks{},
+		db:           db,
+		songsHooks:   noopSongsHooks{},
+		resultsHooks: noopResultsHooks{},
 	}
 }
 
-// SetHooks installs the real songs/results close-and-completion logic once
-// U5/U6's packages exist. Must be called before Start; not safe to call
-// concurrently with command handling.
-func (e *Engine) SetHooks(h LifecycleHooks) {
-	e.hooks = h
+// SetSongsHooks installs U5's real songs_collection close-and-completion
+// logic. Must be called before Start; not safe to call concurrently with
+// command handling.
+func (e *Engine) SetSongsHooks(h SongsCollectionHooks) {
+	e.songsHooks = h
+}
+
+// SetResultsHooks installs U6's real results_collection close-and-completion
+// logic. Must be called before Start; not safe to call concurrently with
+// command handling.
+func (e *Engine) SetResultsHooks(h ResultsCollectionHooks) {
+	e.resultsHooks = h
 }
 
 type week struct {
@@ -134,6 +152,46 @@ type querier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// WeekInfo is a read-only snapshot of the current week, used by U5/U6's
+// command handlers (submission, voting, questionnaire) to check state
+// without needing access to Engine's internals or its lock.
+type WeekInfo struct {
+	ID      int64
+	State   string
+	TopicID *int64
+}
+
+// CurrentWeek returns a snapshot of the active contest's current week, or a
+// WeekInfo with State == StateIdle if no contest is active or no week has
+// ever started.
+func (e *Engine) CurrentWeek(ctx context.Context) (WeekInfo, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	contestID, err := e.activeContestID(ctx, e.db)
+	if errors.Is(err, ErrNoActiveContest) {
+		return WeekInfo{State: StateIdle}, nil
+	}
+	if err != nil {
+		return WeekInfo{}, err
+	}
+
+	w, err := e.currentWeek(ctx, e.db, contestID)
+	if err != nil {
+		return WeekInfo{}, err
+	}
+	if w == nil {
+		return WeekInfo{State: StateIdle}, nil
+	}
+
+	info := WeekInfo{ID: w.id, State: w.state}
+	if w.topicID.Valid {
+		id := w.topicID.Int64
+		info.TopicID = &id
+	}
+	return info, nil
 }
 
 // StartContest deactivates any previously active contest, resets every
