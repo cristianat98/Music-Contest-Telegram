@@ -2,19 +2,21 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"strconv"
 )
 
 var (
-	ErrMissingBotToken   = errors.New("config: BOT_TOKEN is required")
-	ErrMissingChatID     = errors.New("config: CHAT_ID is required")
-	ErrMissingDBPath     = errors.New("config: DB_PATH is required")
+	ErrMissingBotToken = errors.New("config: BOT_TOKEN is required")
+	ErrMissingChatID   = errors.New("config: CHAT_ID is required")
+	ErrMissingDBPath   = errors.New("config: DB_PATH is required")
 )
 
 // Config holds the bot's runtime configuration, loaded from environment variables.
 type Config struct {
 	BotToken string
-	ChatID   string
+	ChatID   int64
 	DBPath   string
 }
 
@@ -26,9 +28,13 @@ func Load() (Config, error) {
 		return Config{}, ErrMissingBotToken
 	}
 
-	chatID := os.Getenv("CHAT_ID")
-	if chatID == "" {
+	chatIDStr := os.Getenv("CHAT_ID")
+	if chatIDStr == "" {
 		return Config{}, ErrMissingChatID
+	}
+	chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
+	if err != nil {
+		return Config{}, fmt.Errorf("config: CHAT_ID must be an integer: %w", err)
 	}
 
 	dbPath := os.Getenv("DB_PATH")

@@ -3,6 +3,7 @@ module github.com/cristianat98/Music-Contest-Telegram
 go 1.25.7
 
 require (
+	github.com/go-telegram/bot v1.21.0
 	github.com/pressly/goose/v3 v3.27.1
 	modernc.org/sqlite v1.53.0
 )

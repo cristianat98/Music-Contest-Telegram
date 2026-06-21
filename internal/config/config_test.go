@@ -23,8 +23,8 @@ func TestLoad_AllVarsSet(t *testing.T) {
 	if cfg.BotToken != "test-token" {
 		t.Errorf("BotToken = %q, want %q", cfg.BotToken, "test-token")
 	}
-	if cfg.ChatID != "-100123" {
-		t.Errorf("ChatID = %q, want %q", cfg.ChatID, "-100123")
+	if cfg.ChatID != -100123 {
+		t.Errorf("ChatID = %d, want %d", cfg.ChatID, -100123)
 	}
 	if cfg.DBPath != "/tmp/musiccontestbot.db" {
 		t.Errorf("DBPath = %q, want %q", cfg.DBPath, "/tmp/musiccontestbot.db")
@@ -50,6 +50,17 @@ func TestLoad_MissingChatID(t *testing.T) {
 	_, err := Load()
 	if !errors.Is(err, ErrMissingChatID) {
 		t.Fatalf("Load() error = %v, want %v", err, ErrMissingChatID)
+	}
+}
+
+func TestLoad_MalformedChatID(t *testing.T) {
+	setEnv(t, "BOT_TOKEN", "test-token")
+	setEnv(t, "CHAT_ID", "not-a-number")
+	setEnv(t, "DB_PATH", "/tmp/musiccontestbot.db")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want error for malformed CHAT_ID")
 	}
 }
 
