@@ -21,7 +21,7 @@ func TestOpen_AppliesMigrations(t *testing.T) {
 	db := openTestDB(t)
 
 	tables := []string{
-		"contests", "topics", "participants", "weeks", "week_participants",
+		"contests", "topics", "topic_usage", "participants", "weeks", "week_participants",
 		"submissions", "votes", "quiz_answers", "outbox_actions",
 	}
 	for _, table := range tables {

@@ -8,14 +8,23 @@ CREATE TABLE contests (
 
 CREATE UNIQUE INDEX idx_contests_active ON contests (active) WHERE active = 1;
 
+-- Topics are a global catalog, reusable across contests. Per-contest usage
+-- is tracked separately in topic_usage so a new contest's pool starts fully
+-- unused (R7/R10) without needing to duplicate or discard topic text.
 CREATE TABLE topics (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    contest_id INTEGER NOT NULL REFERENCES contests (id),
-    text       TEXT    NOT NULL,
-    used       INTEGER NOT NULL DEFAULT 0
+    text       TEXT    NOT NULL UNIQUE,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX idx_topics_contest ON topics (contest_id, used);
+CREATE TABLE topic_usage (
+    contest_id INTEGER NOT NULL REFERENCES contests (id),
+    topic_id   INTEGER NOT NULL REFERENCES topics (id),
+    used       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (contest_id, topic_id)
+);
+
+CREATE INDEX idx_topic_usage_contest ON topic_usage (contest_id, used);
 
 CREATE TABLE participants (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,5 +107,6 @@ DROP TABLE submissions;
 DROP TABLE week_participants;
 DROP TABLE weeks;
 DROP TABLE participants;
+DROP TABLE topic_usage;
 DROP TABLE topics;
 DROP TABLE contests;
