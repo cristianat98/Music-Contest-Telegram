@@ -45,6 +45,11 @@ type SongsCollectionHooks interface {
 
 // ResultsCollectionHooks is SongsCollectionHooks' counterpart for U6.
 type ResultsCollectionHooks interface {
+	// OpenResultsCollection runs inside the same transaction that
+	// transitions a week into results_collection, letting U6 enqueue the
+	// durable per-participant questionnaire/ranking DM dispatch (R21).
+	OpenResultsCollection(ctx context.Context, tx *sql.Tx, weekID int64) error
+
 	// CloseResultsCollection runs inside the same transaction that
 	// transitions a week out of results_collection back to idle, either
 	// naturally or via /forceadvance (R24-R28).
@@ -66,6 +71,9 @@ func (noopSongsHooks) SongsCollectionComplete(context.Context, *sql.DB, int64) (
 
 type noopResultsHooks struct{}
 
+func (noopResultsHooks) OpenResultsCollection(context.Context, *sql.Tx, int64) error {
+	return nil
+}
 func (noopResultsHooks) CloseResultsCollection(context.Context, *sql.Tx, int64, bool) error {
 	return nil
 }

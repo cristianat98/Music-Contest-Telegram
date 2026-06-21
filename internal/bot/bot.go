@@ -49,6 +49,7 @@ func New(ctx context.Context, token string, chatID int64, db *sql.DB) (*App, err
 	}
 	app.SelfID = me.ID
 	app.Contest.SetSongsHooks(contest.NewSongsHooks(db))
+	app.Contest.SetResultsHooks(contest.NewResultsHooks(db))
 
 	app.registerHandlers()
 
@@ -60,6 +61,15 @@ func New(ctx context.Context, token string, chatID int64, db *sql.DB) (*App, err
 func (a *App) SendGroupMessage(ctx context.Context, text string) error {
 	_, err := a.TG.SendMessage(ctx, &tgbot.SendMessageParams{
 		ChatID: a.ChatID,
+		Text:   text,
+	})
+	return err
+}
+
+// SendPrivateMessage implements the rest of contest.ResultsNotifier.
+func (a *App) SendPrivateMessage(ctx context.Context, telegramUserID int64, text string) error {
+	_, err := a.TG.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID: telegramUserID,
 		Text:   text,
 	})
 	return err
@@ -84,6 +94,11 @@ func (a *App) registerHandlers() {
 		AdminOnly(a, a.handleFixSubmission))
 	a.TG.RegisterHandler(tgbot.HandlerTypeMessageText, "removesubmission", tgbot.MatchTypeCommand,
 		AdminOnly(a, a.handleRemoveSubmission))
+
+	a.TG.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, quizCallbackPrefix, tgbot.MatchTypePrefix,
+		a.handleQuizAnswerCallback)
+	a.TG.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, rankingCallbackPrefix, tgbot.MatchTypePrefix,
+		a.handleRankingPickCallback)
 }
 
 // Start begins long-polling for updates. It blocks until ctx is canceled.

@@ -29,6 +29,8 @@ func fakeTelegramServer(t *testing.T, senderStatus models.ChatMemberType) (*http
 			r.ParseMultipartForm(1 << 20)
 			lastSentText = r.FormValue("text")
 			writeOKResult(w, map[string]any{"message_id": 1})
+		case strings.HasSuffix(r.URL.Path, "/answerCallbackQuery"):
+			writeOKResult(w, true)
 		default:
 			writeOKResult(w, map[string]any{})
 		}

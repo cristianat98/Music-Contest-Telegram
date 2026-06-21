@@ -70,6 +70,9 @@ func (e *Engine) advance(ctx context.Context, w *week, forced bool) (string, err
 		`, StateResultsCollection, now.Format(time.RFC3339), w.id); err != nil {
 			return "", fmt.Errorf("contest: transition to results_collection: %w", err)
 		}
+		if err := e.resultsHooks.OpenResultsCollection(ctx, tx, w.id); err != nil {
+			return "", fmt.Errorf("contest: open results_collection: %w", err)
+		}
 	case StateResultsCollection:
 		if err := e.resultsHooks.CloseResultsCollection(ctx, tx, w.id, forced); err != nil {
 			return "", fmt.Errorf("contest: close results_collection: %w", err)

@@ -177,6 +177,10 @@ func (h *countingHooks) CloseSongsCollection(ctx context.Context, tx *sql.Tx, we
 	return nil
 }
 
+func (h *countingHooks) OpenResultsCollection(ctx context.Context, tx *sql.Tx, weekID int64) error {
+	return nil
+}
+
 func (h *countingHooks) CloseResultsCollection(ctx context.Context, tx *sql.Tx, weekID int64, forced bool) error {
 	h.mu.Lock()
 	h.resultsCloses++

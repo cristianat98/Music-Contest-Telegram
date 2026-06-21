@@ -34,6 +34,16 @@ func (h *SongsHooks) CloseSongsCollection(ctx context.Context, tx *sql.Tx, weekI
 		}
 	}
 
+	// Assign display_order here, inside the same transaction that closes
+	// songs_collection, rather than waiting for the separate
+	// PublishDueSongs outbox processing: OpenResultsCollection (called
+	// right after this, in the same advance()) enqueues the questionnaire/
+	// ranking prompts, and those need display_order to already exist or
+	// PendingQuizSubmissions/PendingRankingSubmissions would scan NULL.
+	if err := ensureDisplayOrderAssigned(ctx, tx, weekID); err != nil {
+		return err
+	}
+
 	payload, err := json.Marshal(map[string]any{"week_id": weekID})
 	if err != nil {
 		return fmt.Errorf("contest: marshal publish_songs payload: %w", err)
@@ -163,10 +173,6 @@ func processPublishSongsAction(ctx context.Context, db *sql.DB, notifier GroupNo
 		return fmt.Errorf("contest: mark publish_songs in_progress: %w", err)
 	}
 
-	if err := ensureDisplayOrderAssigned(ctx, db, payload.WeekID); err != nil {
-		return err
-	}
-
 	urls, err := orderedSubmissionURLs(ctx, db, payload.WeekID)
 	if err != nil {
 		return err
@@ -200,9 +206,9 @@ func processPublishSongsAction(ctx context.Context, db *sql.DB, notifier GroupNo
 // week -- a retry sees every row already assigned and is a no-op, which is
 // what makes the published numbering (and the ranking buttons built on it)
 // stable across outbox retries.
-func ensureDisplayOrderAssigned(ctx context.Context, db *sql.DB, weekID int64) error {
+func ensureDisplayOrderAssigned(ctx context.Context, q querier, weekID int64) error {
 	var unassigned int
-	if err := db.QueryRowContext(ctx, `
+	if err := q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM submissions WHERE week_id = ? AND display_order IS NULL
 	`, weekID).Scan(&unassigned); err != nil {
 		return fmt.Errorf("contest: count unassigned display_order: %w", err)
@@ -211,7 +217,7 @@ func ensureDisplayOrderAssigned(ctx context.Context, db *sql.DB, weekID int64) e
 		return nil
 	}
 
-	rows, err := db.QueryContext(ctx, `SELECT id FROM submissions WHERE week_id = ? ORDER BY RANDOM()`, weekID)
+	rows, err := q.QueryContext(ctx, `SELECT id FROM submissions WHERE week_id = ? ORDER BY RANDOM()`, weekID)
 	if err != nil {
 		return fmt.Errorf("contest: shuffle submissions: %w", err)
 	}
@@ -231,7 +237,7 @@ func ensureDisplayOrderAssigned(ctx context.Context, db *sql.DB, weekID int64) e
 	rows.Close()
 
 	for i, id := range ids {
-		if _, err := db.ExecContext(ctx, `
+		if _, err := q.ExecContext(ctx, `
 			UPDATE submissions SET display_order = ? WHERE id = ?
 		`, i+1, id); err != nil {
 			return fmt.Errorf("contest: assign display_order for submission %d: %w", id, err)
