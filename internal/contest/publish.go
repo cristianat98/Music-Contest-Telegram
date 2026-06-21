@@ -163,22 +163,26 @@ func processPublishSongsAction(ctx context.Context, db *sql.DB, notifier GroupNo
 		return fmt.Errorf("contest: mark publish_songs in_progress: %w", err)
 	}
 
-	urls, err := shuffledSubmissionURLs(ctx, db, payload.WeekID)
+	if err := ensureDisplayOrderAssigned(ctx, db, payload.WeekID); err != nil {
+		return err
+	}
+
+	urls, err := orderedSubmissionURLs(ctx, db, payload.WeekID)
 	if err != nil {
 		return err
 	}
 
-	text := "Songs are in! Listen in this shuffled order (no names attached):\n"
+	text := "Songs are in! Listen in this order (no names attached) -- you'll rank them by this number:\n"
 	for i, url := range urls {
 		text += fmt.Sprintf("%d. %s\n", i+1, url)
 	}
 
-	// Re-render from current DB state on retry rather than tracking a
-	// separate idempotency key: a resend (even with a freshly re-shuffled
-	// order, since voting doesn't depend on this announcement's order) is
-	// harmless, just a re-announcement of the same songs -- never a
-	// duplicate side effect (resolves doc-review finding A2 on outbox
-	// idempotency for Telegram sends).
+	// Re-render from the now-persisted display_order on retry rather than
+	// tracking a separate idempotency key: display_order is assigned once
+	// and reused, so a resend renders byte-identical content -- never a
+	// duplicate or divergent side effect (resolves doc-review finding A2 on
+	// outbox idempotency for Telegram sends). The stable order also gives
+	// U6's ranking buttons consistent "Song N" numbering.
 	if err := notifier.SendGroupMessage(ctx, text); err != nil {
 		return fmt.Errorf("contest: send publish_songs message: %w", err)
 	}
@@ -191,9 +195,54 @@ func processPublishSongsAction(ctx context.Context, db *sql.DB, notifier GroupNo
 	return nil
 }
 
-func shuffledSubmissionURLs(ctx context.Context, db *sql.DB, weekID int64) ([]string, error) {
+// ensureDisplayOrderAssigned shuffles and persists a stable display_order
+// for a week's submissions, but only the first time it's called for that
+// week -- a retry sees every row already assigned and is a no-op, which is
+// what makes the published numbering (and the ranking buttons built on it)
+// stable across outbox retries.
+func ensureDisplayOrderAssigned(ctx context.Context, db *sql.DB, weekID int64) error {
+	var unassigned int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM submissions WHERE week_id = ? AND display_order IS NULL
+	`, weekID).Scan(&unassigned); err != nil {
+		return fmt.Errorf("contest: count unassigned display_order: %w", err)
+	}
+	if unassigned == 0 {
+		return nil
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT id FROM submissions WHERE week_id = ? ORDER BY RANDOM()`, weekID)
+	if err != nil {
+		return fmt.Errorf("contest: shuffle submissions: %w", err)
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("contest: scan submission id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for i, id := range ids {
+		if _, err := db.ExecContext(ctx, `
+			UPDATE submissions SET display_order = ? WHERE id = ?
+		`, i+1, id); err != nil {
+			return fmt.Errorf("contest: assign display_order for submission %d: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func orderedSubmissionURLs(ctx context.Context, db *sql.DB, weekID int64) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT url FROM submissions WHERE week_id = ? ORDER BY RANDOM()
+		SELECT url FROM submissions WHERE week_id = ? ORDER BY display_order
 	`, weekID)
 	if err != nil {
 		return nil, fmt.Errorf("contest: list submissions for publish: %w", err)

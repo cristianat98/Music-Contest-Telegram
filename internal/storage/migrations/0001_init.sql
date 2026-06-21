@@ -65,6 +65,10 @@ CREATE TABLE submissions (
     week_id        INTEGER NOT NULL REFERENCES weeks (id),
     participant_id INTEGER NOT NULL REFERENCES participants (id),
     url            TEXT    NOT NULL,
+    -- Assigned once, when songs are published (shuffled): gives ranking
+    -- buttons and any retried publish message a stable "Song N" numbering
+    -- instead of re-shuffling differently each time.
+    display_order  INTEGER,
     created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
     UNIQUE (week_id, participant_id)
 );

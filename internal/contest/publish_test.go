@@ -194,3 +194,55 @@ func TestPublishDueSongs_SendsAndMarksDone(t *testing.T) {
 		t.Errorf("messages sent after re-run = %d, want still 1 (done rows aren't reprocessed)", len(notifier.messages))
 	}
 }
+
+func TestEnsureDisplayOrderAssigned_StableAcrossRetries(t *testing.T) {
+	ctx := context.Background()
+	e, db := openTestEngine(t)
+	seedParticipants(t, db, 2)
+	seedTopic(t, db, "topic-a")
+
+	if _, err := e.StartContest(ctx, "Contest"); err != nil {
+		t.Fatalf("StartContest() error = %v", err)
+	}
+	if _, err := e.StartWeek(ctx); err != nil {
+		t.Fatalf("StartWeek() error = %v", err)
+	}
+
+	var weekID int64
+	db.QueryRow("SELECT id FROM weeks ORDER BY id DESC LIMIT 1").Scan(&weekID)
+	rows, _ := db.Query("SELECT id FROM participants")
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	rows.Close()
+	seedSubmission(t, db, weekID, ids[0], "https://youtu.be/abc")
+	seedSubmission(t, db, weekID, ids[1], "https://youtu.be/def")
+
+	if err := ensureDisplayOrderAssigned(ctx, db, weekID); err != nil {
+		t.Fatalf("first ensureDisplayOrderAssigned() error = %v", err)
+	}
+	first, err := orderedSubmissionURLs(ctx, db, weekID)
+	if err != nil {
+		t.Fatalf("orderedSubmissionURLs() error = %v", err)
+	}
+
+	if err := ensureDisplayOrderAssigned(ctx, db, weekID); err != nil {
+		t.Fatalf("second ensureDisplayOrderAssigned() error = %v", err)
+	}
+	second, err := orderedSubmissionURLs(ctx, db, weekID)
+	if err != nil {
+		t.Fatalf("orderedSubmissionURLs() error = %v", err)
+	}
+
+	if len(first) != len(second) {
+		t.Fatalf("order length changed between calls: %v vs %v", first, second)
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Errorf("display_order changed on retry at index %d: %q vs %q", i, first[i], second[i])
+		}
+	}
+}
