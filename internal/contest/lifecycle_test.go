@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -27,7 +28,7 @@ func seedParticipants(t *testing.T, db *sql.DB, n int) {
 	for i := 0; i < n; i++ {
 		if _, err := db.Exec(
 			"INSERT INTO participants (telegram_user_id, display_name, active) VALUES (?, ?, 1)",
-			1000+i, "user",
+			1000+i, fmt.Sprintf("user%d", i),
 		); err != nil {
 			t.Fatalf("seed participant: %v", err)
 		}

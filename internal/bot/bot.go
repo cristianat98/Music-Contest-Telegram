@@ -48,10 +48,21 @@ func New(ctx context.Context, token string, chatID int64, db *sql.DB) (*App, err
 		return nil, fmt.Errorf("bot: get bot identity: %w", err)
 	}
 	app.SelfID = me.ID
+	app.Contest.SetSongsHooks(contest.NewSongsHooks(db))
 
 	app.registerHandlers()
 
 	return app, nil
+}
+
+// SendGroupMessage implements contest.GroupNotifier, letting the contest
+// package post to the target chat without importing go-telegram/bot.
+func (a *App) SendGroupMessage(ctx context.Context, text string) error {
+	_, err := a.TG.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID: a.ChatID,
+		Text:   text,
+	})
+	return err
 }
 
 func (a *App) registerHandlers() {
@@ -68,6 +79,11 @@ func (a *App) registerHandlers() {
 		AdminOnly(a, a.handleModifyLimit))
 	a.TG.RegisterHandler(tgbot.HandlerTypeMessageText, "forceadvance", tgbot.MatchTypeCommand,
 		AdminOnly(a, a.handleForceAdvance))
+
+	a.TG.RegisterHandler(tgbot.HandlerTypeMessageText, "fixsubmission", tgbot.MatchTypeCommand,
+		AdminOnly(a, a.handleFixSubmission))
+	a.TG.RegisterHandler(tgbot.HandlerTypeMessageText, "removesubmission", tgbot.MatchTypeCommand,
+		AdminOnly(a, a.handleRemoveSubmission))
 }
 
 // Start begins long-polling for updates. It blocks until ctx is canceled.
@@ -81,6 +97,8 @@ func (a *App) defaultHandler(ctx context.Context, b *tgbot.Bot, update *models.U
 		a.handleChatMemberUpdate(ctx, update.ChatMember)
 	case update.MyChatMember != nil:
 		a.handleSelfChatMemberUpdate(ctx, update.MyChatMember)
+	case update.Message != nil && update.Message.Chat.Type == models.ChatTypePrivate:
+		a.handlePrivateMessage(ctx, b, update)
 	default:
 		log.Printf("bot: unhandled update id=%d", update.ID)
 	}

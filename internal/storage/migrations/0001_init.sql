@@ -43,6 +43,7 @@ CREATE TABLE weeks (
     topic_id              INTEGER REFERENCES topics (id),
     state_started_at      TEXT,
     deadline_override_days INTEGER,
+    last_reminder_at      TEXT,
     created_at            TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
