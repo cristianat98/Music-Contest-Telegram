@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/pressly/goose/v3"
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // registers the "sqlite" driver with database/sql
 )
 
 //go:embed migrations/*.sql

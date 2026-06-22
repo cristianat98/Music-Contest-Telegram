@@ -68,29 +68,38 @@ func TestHandleRankingPickCallback_RejectsWrongSender(t *testing.T) {
 	}
 }
 
+// completeQuizAndRanking answers every pending familiarity question and
+// ranking pick for one participant, in the real flow's order (questionnaire
+// before ranking, R21), driving them to results-collection completion.
+func completeQuizAndRanking(t *testing.T, ctx context.Context, app *App, weekID, participantID int64) {
+	t.Helper()
+
+	for {
+		pending, _ := contest.PendingQuizSubmissions(ctx, app.DB, weekID, participantID)
+		if len(pending) == 0 {
+			break
+		}
+		if err := contest.RecordQuizAnswer(ctx, app.DB, weekID, participantID, pending[0].ID, false); err != nil {
+			t.Fatalf("RecordQuizAnswer() error = %v", err)
+		}
+	}
+	for {
+		pending, _ := contest.PendingRankingSubmissions(ctx, app.DB, weekID, participantID)
+		if len(pending) == 0 {
+			break
+		}
+		if err := contest.RecordRankingPick(ctx, app.DB, weekID, participantID, pending[0].ID); err != nil {
+			t.Fatalf("RecordRankingPick() error = %v", err)
+		}
+	}
+}
+
 func TestProcessResultsNotifications_PublishesOnceWeekComplete(t *testing.T) {
 	app, weekID, participantIDs := setupResultsCollectionApp(t, 2001, 2002)
 	ctx := context.Background()
 
 	for _, pid := range participantIDs {
-		for {
-			pending, _ := contest.PendingQuizSubmissions(ctx, app.DB, weekID, pid)
-			if len(pending) == 0 {
-				break
-			}
-			if err := contest.RecordQuizAnswer(ctx, app.DB, weekID, pid, pending[0].ID, false); err != nil {
-				t.Fatalf("RecordQuizAnswer() error = %v", err)
-			}
-		}
-		for {
-			pending, _ := contest.PendingRankingSubmissions(ctx, app.DB, weekID, pid)
-			if len(pending) == 0 {
-				break
-			}
-			if err := contest.RecordRankingPick(ctx, app.DB, weekID, pid, pending[0].ID); err != nil {
-				t.Fatalf("RecordRankingPick() error = %v", err)
-			}
-		}
+		completeQuizAndRanking(t, ctx, app, weekID, pid)
 	}
 
 	if err := app.Contest.Tick(ctx); err != nil {

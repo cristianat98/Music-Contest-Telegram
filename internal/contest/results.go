@@ -14,7 +14,32 @@ const (
 	OutboxActionStartResultsPrompt = "start_results_prompt"
 	OutboxActionPartialNotice      = "results_partial_notice"
 	OutboxActionPublishResults     = "publish_results"
+
+	errFmtListRequiredParticipants = "contest: list required participants: %w"
+	errFmtScanParticipantID        = "contest: scan participant id: %w"
 )
+
+// collectParticipantIDs runs query (expected to select a single int64
+// participant_id column) and drains it fully before returning, satisfying
+// the single-connection constraint (KTD2) that callers issuing nested
+// per-participant queries afterwards rely on.
+func collectParticipantIDs(ctx context.Context, q querier, query string, args ...any) ([]int64, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf(errFmtListRequiredParticipants, err)
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf(errFmtScanParticipantID, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
 
 // ResultsNotifier lets this package post the final results announcement to
 // the group and a partial-progress notice to a single participant (R25),
@@ -38,24 +63,10 @@ func NewResultsHooks(db *sql.DB) *ResultsHooks {
 }
 
 func (h *ResultsHooks) OpenResultsCollection(ctx context.Context, tx *sql.Tx, weekID int64) error {
-	rows, err := tx.QueryContext(ctx, `SELECT participant_id FROM week_participants WHERE week_id = ?`, weekID)
+	participantIDs, err := collectParticipantIDs(ctx, tx, `SELECT participant_id FROM week_participants WHERE week_id = ?`, weekID)
 	if err != nil {
-		return fmt.Errorf("contest: list required participants: %w", err)
-	}
-	var participantIDs []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return fmt.Errorf("contest: scan participant id: %w", err)
-		}
-		participantIDs = append(participantIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
 		return err
 	}
-	rows.Close()
 
 	for _, participantID := range participantIDs {
 		payload, err := json.Marshal(map[string]any{"week_id": weekID, "participant_id": participantID})
@@ -117,30 +128,15 @@ func participantDone(ctx context.Context, q querier, weekID, participantID int64
 }
 
 func (h *ResultsHooks) ResultsCollectionComplete(ctx context.Context, db *sql.DB, weekID int64) (bool, error) {
-	rows, err := db.QueryContext(ctx, `SELECT participant_id FROM week_participants WHERE week_id = ?`, weekID)
+	// collectParticipantIDs fully drains and closes the outer query before
+	// returning: SetMaxOpenConns(1) (KTD2) means only one connection exists
+	// at all, so an open, mid-iteration *Rows would otherwise deadlock
+	// against the nested QueryRowContext calls inside participantDone below.
+	participantIDs, err := collectParticipantIDs(ctx, db, `SELECT participant_id FROM week_participants WHERE week_id = ?`, weekID)
 	if err != nil {
-		return false, fmt.Errorf("contest: list required participants: %w", err)
-	}
-	var participantIDs []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return false, fmt.Errorf("contest: scan participant id: %w", err)
-		}
-		participantIDs = append(participantIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
 		return false, err
 	}
-	rows.Close()
 
-	// The outer query must be fully drained and closed before issuing the
-	// nested per-participant queries below: SetMaxOpenConns(1) (KTD2) means
-	// only one connection exists at all, so an open, mid-iteration *Rows
-	// would otherwise deadlock against the nested QueryRowContext calls
-	// inside participantDone.
 	if len(participantIDs) == 0 {
 		return false, nil
 	}
@@ -184,26 +180,12 @@ func (h *ResultsHooks) CloseResultsCollection(ctx context.Context, tx *sql.Tx, w
 // entirely (not partially scored), exactly one strike regardless of which
 // part(s) were missing, and a queued private notice (R25).
 func (h *ResultsHooks) discardAndStrikeIncomplete(ctx context.Context, tx *sql.Tx, weekID int64) error {
-	rows, err := tx.QueryContext(ctx, `
+	participantIDs, err := collectParticipantIDs(ctx, tx, `
 		SELECT participant_id FROM week_participants WHERE week_id = ? AND results_struck = 0
 	`, weekID)
 	if err != nil {
-		return fmt.Errorf("contest: list required participants: %w", err)
-	}
-	var participantIDs []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return fmt.Errorf("contest: scan participant id: %w", err)
-		}
-		participantIDs = append(participantIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
 		return err
 	}
-	rows.Close()
 
 	for _, participantID := range participantIDs {
 		done, err := participantDone(ctx, tx, weekID, participantID)
@@ -213,33 +195,43 @@ func (h *ResultsHooks) discardAndStrikeIncomplete(ctx context.Context, tx *sql.T
 		if done {
 			continue
 		}
+		if err := discardAndStrikeParticipant(ctx, tx, weekID, participantID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM votes WHERE week_id = ? AND voter_id = ?
-		`, weekID, participantID); err != nil {
-			return fmt.Errorf("contest: discard partial ranking for %d: %w", participantID, err)
-		}
+// discardAndStrikeParticipant discards one participant's partial ranking,
+// records their strike, and queues their partial-progress notice (R24,
+// R25, R28), for a single participant found incomplete by
+// discardAndStrikeIncomplete.
+func discardAndStrikeParticipant(ctx context.Context, tx *sql.Tx, weekID, participantID int64) error {
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM votes WHERE week_id = ? AND voter_id = ?
+	`, weekID, participantID); err != nil {
+		return fmt.Errorf("contest: discard partial ranking for %d: %w", participantID, err)
+	}
 
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE week_participants SET results_struck = 1 WHERE week_id = ? AND participant_id = ?
-		`, weekID, participantID); err != nil {
-			return fmt.Errorf("contest: mark results_struck for %d: %w", participantID, err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE participants SET strikes = strikes + 1 WHERE id = ?
-		`, participantID); err != nil {
-			return fmt.Errorf("contest: increment strikes for %d: %w", participantID, err)
-		}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE week_participants SET results_struck = 1 WHERE week_id = ? AND participant_id = ?
+	`, weekID, participantID); err != nil {
+		return fmt.Errorf("contest: mark results_struck for %d: %w", participantID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE participants SET strikes = strikes + 1 WHERE id = ?
+	`, participantID); err != nil {
+		return fmt.Errorf("contest: increment strikes for %d: %w", participantID, err)
+	}
 
-		payload, err := json.Marshal(map[string]any{"week_id": weekID, "participant_id": participantID})
-		if err != nil {
-			return fmt.Errorf("contest: marshal partial notice payload: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO outbox_actions (action_type, payload_json, status) VALUES (?, ?, 'pending')
-		`, OutboxActionPartialNotice, string(payload)); err != nil {
-			return fmt.Errorf("contest: enqueue partial notice for %d: %w", participantID, err)
-		}
+	payload, err := json.Marshal(map[string]any{"week_id": weekID, "participant_id": participantID})
+	if err != nil {
+		return fmt.Errorf("contest: marshal partial notice payload: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO outbox_actions (action_type, payload_json, status) VALUES (?, ?, 'pending')
+	`, OutboxActionPartialNotice, string(payload)); err != nil {
+		return fmt.Errorf("contest: enqueue partial notice for %d: %w", participantID, err)
 	}
 	return nil
 }

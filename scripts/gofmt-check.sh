@@ -5,7 +5,7 @@
 set -euo pipefail
 
 unformatted=$(gofmt -l "$@")
-if [ -n "$unformatted" ]; then
+if [[ -n "$unformatted" ]]; then
   echo "The following files are not gofmt-formatted:"
   echo "$unformatted"
   echo "Run: gofmt -w $unformatted"
