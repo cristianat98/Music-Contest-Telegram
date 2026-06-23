@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -114,6 +115,53 @@ func TestStartWeek_RejectsWithNoActiveContest(t *testing.T) {
 	}
 }
 
+// closedDBEngine returns an Engine whose underlying DB connection is
+// already closed, so every db/tx operation a method attempts fails
+// immediately -- a cheap way to exercise DB-error branches without
+// per-call fault injection.
+func closedDBEngine(t *testing.T) *Engine {
+	t.Helper()
+	e, db := openTestEngine(t)
+	db.Close()
+	return e
+}
+
+func TestStartContest_DBError(t *testing.T) {
+	if _, err := closedDBEngine(t).StartContest(context.Background(), "Contest"); err == nil {
+		t.Error("StartContest() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestStartWeek_DBError(t *testing.T) {
+	if _, err := closedDBEngine(t).StartWeek(context.Background()); err == nil {
+		t.Error("StartWeek() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestFinishContest_DBError(t *testing.T) {
+	if _, err := closedDBEngine(t).FinishContest(context.Background()); err == nil {
+		t.Error("FinishContest() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestModifyLimit_DBError(t *testing.T) {
+	if _, err := closedDBEngine(t).ModifyLimit(context.Background(), 3); err == nil {
+		t.Error("ModifyLimit() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestForceAdvance_DBError(t *testing.T) {
+	if _, err := closedDBEngine(t).ForceAdvance(context.Background()); err == nil {
+		t.Error("ForceAdvance() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestCurrentWeek_DBError(t *testing.T) {
+	if _, err := closedDBEngine(t).CurrentWeek(context.Background()); err == nil {
+		t.Error("CurrentWeek() error = nil, want an error from the closed DB")
+	}
+}
+
 func TestFinishContest_RejectedWhileWeekNotIdle(t *testing.T) {
 	ctx := context.Background()
 	e, db := openTestEngine(t)
@@ -159,6 +207,61 @@ func TestForceAdvance_RejectsWithNoActiveState(t *testing.T) {
 		t.Fatalf("ForceAdvance() error = %v, want %v", err, ErrNoActiveState)
 	}
 	_ = db
+}
+
+func TestNoopResultsHooks_ResultsCollectionComplete_AlwaysFalse(t *testing.T) {
+	complete, err := noopResultsHooks{}.ResultsCollectionComplete(context.Background(), nil, 1)
+	if err != nil {
+		t.Fatalf("ResultsCollectionComplete() error = %v", err)
+	}
+	if complete {
+		t.Error("expected the default no-op hooks to never report complete")
+	}
+}
+
+func TestModifyLimit_Success(t *testing.T) {
+	ctx := context.Background()
+	e, db := openTestEngine(t)
+	seedParticipants(t, db, 2)
+	seedTopic(t, db, "topic-a")
+
+	if _, err := e.StartContest(ctx, "Contest"); err != nil {
+		t.Fatalf("StartContest() error = %v", err)
+	}
+	if _, err := e.StartWeek(ctx); err != nil {
+		t.Fatalf("StartWeek() error = %v", err)
+	}
+
+	msg, err := e.ModifyLimit(ctx, 5)
+	if err != nil {
+		t.Fatalf("ModifyLimit() error = %v", err)
+	}
+	if !strings.Contains(msg, "Deadline") {
+		t.Errorf("ModifyLimit() message = %q, want it to mention the updated deadline", msg)
+	}
+
+	var days int
+	if err := db.QueryRow("SELECT deadline_override_days FROM weeks ORDER BY id DESC LIMIT 1").Scan(&days); err != nil {
+		t.Fatalf("query deadline_override_days: %v", err)
+	}
+	if days != 5 {
+		t.Errorf("deadline_override_days = %d, want 5", days)
+	}
+}
+
+func TestModifyLimit_RejectsWithNoActiveState(t *testing.T) {
+	ctx := context.Background()
+	e, db := openTestEngine(t)
+	seedParticipants(t, db, 2)
+
+	if _, err := e.StartContest(ctx, "Contest"); err != nil {
+		t.Fatalf("StartContest() error = %v", err)
+	}
+
+	_, err := e.ModifyLimit(ctx, 5)
+	if !errors.Is(err, ErrNoActiveState) {
+		t.Fatalf("ModifyLimit() error = %v, want %v", err, ErrNoActiveState)
+	}
 }
 
 // countingHooks counts how many times each close hook actually runs, so a

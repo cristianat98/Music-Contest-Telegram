@@ -14,8 +14,10 @@ const reminderHour = 20 // 20:00 Europe/Madrid (R17)
 // SendDueReminders posts a daily reminder naming participants who haven't
 // submitted yet, while songs_collection is open (R17). Safe to call on
 // every tick: it no-ops unless it's past 20:00 Europe/Madrid for the
-// current day and no reminder has been sent yet today for this week.
-func SendDueReminders(ctx context.Context, db *sql.DB, notifier GroupNotifier) error {
+// current day and no reminder has been sent yet today for this week. now is
+// the caller's current time (injected rather than read internally so tests
+// can exercise the post-20:00 path deterministically).
+func SendDueReminders(ctx context.Context, db *sql.DB, notifier GroupNotifier, now time.Time) error {
 	weekID, lastReminder, err := songsCollectionWeekForReminder(ctx, db)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -24,7 +26,7 @@ func SendDueReminders(ctx context.Context, db *sql.DB, notifier GroupNotifier) e
 		return err
 	}
 
-	now := time.Now().In(madridLocation)
+	now = now.In(madridLocation)
 	if now.Hour() < reminderHour {
 		return nil
 	}

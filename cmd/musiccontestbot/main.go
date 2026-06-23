@@ -76,7 +76,7 @@ func runTick(ctx context.Context, app *bot.App) {
 	if err := app.Contest.Tick(ctx); err != nil {
 		log.Printf("tick: lifecycle error: %v", err)
 	}
-	if err := contest.SendDueReminders(ctx, app.DB, app); err != nil {
+	if err := contest.SendDueReminders(ctx, app.DB, app, time.Now()); err != nil {
 		log.Printf("tick: reminders error: %v", err)
 	}
 	if err := contest.PublishDueSongs(ctx, app.DB, app); err != nil {

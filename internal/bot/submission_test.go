@@ -85,6 +85,59 @@ func TestHandlePrivateMessage_ValidYouTubeURL_Accepted(t *testing.T) {
 	}
 }
 
+func TestHandlePrivateMessage_EmptyText_Ignored(t *testing.T) {
+	app := openTestAppWithContest(t)
+	seedActiveSongsCollection(t, app, 1001, 1002)
+
+	app.handlePrivateMessage(context.Background(), nil, privateMessageUpdate(1001, "   "))
+
+	var count int
+	app.DB.QueryRow("SELECT COUNT(*) FROM submissions").Scan(&count)
+	if count != 0 {
+		t.Errorf("submissions = %d, want 0 for an empty message", count)
+	}
+}
+
+func TestHandlePrivateMessage_SlashCommand_Ignored(t *testing.T) {
+	app := openTestAppWithContest(t)
+	seedActiveSongsCollection(t, app, 1001, 1002)
+
+	app.handlePrivateMessage(context.Background(), nil, privateMessageUpdate(1001, "/start"))
+
+	var count int
+	app.DB.QueryRow("SELECT COUNT(*) FROM submissions").Scan(&count)
+	if count != 0 {
+		t.Errorf("submissions = %d, want 0 for a slash command", count)
+	}
+}
+
+func TestHandlePrivateMessage_NotSongsCollection_Rejected(t *testing.T) {
+	app := openTestAppWithContest(t)
+	srv, lastText := fakeTelegramServer(t, models.ChatMemberTypeAdministrator)
+	defer srv.Close()
+	app.TG = newTestTGBot(t, srv.URL)
+
+	app.handlePrivateMessage(context.Background(), nil, privateMessageUpdate(1001, "https://youtu.be/abc"))
+
+	if !strings.Contains(*lastText, "aren't being collected") {
+		t.Errorf("lastText = %q, want it to mention songs aren't being collected", *lastText)
+	}
+}
+
+func TestHandlePrivateMessage_UnknownParticipant_Rejected(t *testing.T) {
+	app := openTestAppWithContest(t)
+	seedActiveSongsCollection(t, app, 1001, 1002)
+	srv, lastText := fakeTelegramServer(t, models.ChatMemberTypeAdministrator)
+	defer srv.Close()
+	app.TG = newTestTGBot(t, srv.URL)
+
+	app.handlePrivateMessage(context.Background(), nil, privateMessageUpdate(9999, "https://youtu.be/abc"))
+
+	if !strings.Contains(*lastText, "not a recognized participant") {
+		t.Errorf("lastText = %q, want it to mention the sender isn't recognized", *lastText)
+	}
+}
+
 func TestHandlePrivateMessage_MalformedURL_Rejected(t *testing.T) {
 	app := openTestAppWithContest(t)
 	seedActiveSongsCollection(t, app, 1001, 1002)
@@ -196,6 +249,109 @@ func TestHandleFixSubmission_ReplacesExisting(t *testing.T) {
 	app.DB.QueryRow("SELECT url FROM submissions WHERE week_id = ?", weekID).Scan(&url)
 	if url != "https://youtu.be/fixed" {
 		t.Errorf("url = %q, want the fixed submission", url)
+	}
+}
+
+func adminMessageUpdate(text string) *models.Update {
+	return &models.Update{
+		Message: &models.Message{
+			From: &models.User{ID: 9999},
+			Chat: models.Chat{ID: -100},
+			Text: text,
+		},
+	}
+}
+
+func TestHandleFixSubmission_UsageMessage(t *testing.T) {
+	app := openTestAppWithContest(t)
+	srv, lastText := fakeTelegramServer(t, models.ChatMemberTypeAdministrator)
+	defer srv.Close()
+	app.TG = newTestTGBot(t, srv.URL)
+
+	app.handleFixSubmission(context.Background(), nil, adminMessageUpdate("/fixsubmission"))
+
+	if !strings.Contains(*lastText, "Usage") {
+		t.Errorf("lastText = %q, want it to mention Usage", *lastText)
+	}
+}
+
+func TestHandleFixSubmission_MalformedURL_Rejected(t *testing.T) {
+	app := openTestAppWithContest(t)
+	srv, lastText := fakeTelegramServer(t, models.ChatMemberTypeAdministrator)
+	defer srv.Close()
+	app.TG = newTestTGBot(t, srv.URL)
+
+	app.handleFixSubmission(context.Background(), nil, adminMessageUpdate("/fixsubmission @user0 not-a-url"))
+
+	if !strings.Contains(*lastText, "YouTube") {
+		t.Errorf("lastText = %q, want it to mention an invalid YouTube URL", *lastText)
+	}
+}
+
+func TestHandleFixSubmission_NoActiveWeek_Rejected(t *testing.T) {
+	app := openTestAppWithContest(t)
+	srv, lastText := fakeTelegramServer(t, models.ChatMemberTypeAdministrator)
+	defer srv.Close()
+	app.TG = newTestTGBot(t, srv.URL)
+
+	app.handleFixSubmission(context.Background(), nil, adminMessageUpdate("/fixsubmission @user0 https://youtu.be/fixed"))
+
+	if !strings.Contains(*lastText, "no active week") {
+		t.Errorf("lastText = %q, want it to mention no active week", *lastText)
+	}
+}
+
+func TestHandleFixSubmission_UnknownUsername_Rejected(t *testing.T) {
+	app := openTestAppWithContest(t)
+	seedActiveSongsCollection(t, app, 1001, 1002)
+	srv, lastText := fakeTelegramServer(t, models.ChatMemberTypeAdministrator)
+	defer srv.Close()
+	app.TG = newTestTGBot(t, srv.URL)
+
+	app.handleFixSubmission(context.Background(), nil, adminMessageUpdate("/fixsubmission @nobody https://youtu.be/fixed"))
+
+	if !strings.Contains(*lastText, "No participant found") {
+		t.Errorf("lastText = %q, want it to mention no participant found", *lastText)
+	}
+}
+
+func TestHandleRemoveSubmission_UsageMessage(t *testing.T) {
+	app := openTestAppWithContest(t)
+	srv, lastText := fakeTelegramServer(t, models.ChatMemberTypeAdministrator)
+	defer srv.Close()
+	app.TG = newTestTGBot(t, srv.URL)
+
+	app.handleRemoveSubmission(context.Background(), nil, adminMessageUpdate("/removesubmission"))
+
+	if !strings.Contains(*lastText, "Usage") {
+		t.Errorf("lastText = %q, want it to mention Usage", *lastText)
+	}
+}
+
+func TestHandleRemoveSubmission_NoActiveWeek_Rejected(t *testing.T) {
+	app := openTestAppWithContest(t)
+	srv, lastText := fakeTelegramServer(t, models.ChatMemberTypeAdministrator)
+	defer srv.Close()
+	app.TG = newTestTGBot(t, srv.URL)
+
+	app.handleRemoveSubmission(context.Background(), nil, adminMessageUpdate("/removesubmission @user0"))
+
+	if !strings.Contains(*lastText, "no active week") {
+		t.Errorf("lastText = %q, want it to mention no active week", *lastText)
+	}
+}
+
+func TestHandleRemoveSubmission_UnknownUsername_Rejected(t *testing.T) {
+	app := openTestAppWithContest(t)
+	seedActiveSongsCollection(t, app, 1001, 1002)
+	srv, lastText := fakeTelegramServer(t, models.ChatMemberTypeAdministrator)
+	defer srv.Close()
+	app.TG = newTestTGBot(t, srv.URL)
+
+	app.handleRemoveSubmission(context.Background(), nil, adminMessageUpdate("/removesubmission @nobody"))
+
+	if !strings.Contains(*lastText, "No participant found") {
+		t.Errorf("lastText = %q, want it to mention no participant found", *lastText)
 	}
 }
 

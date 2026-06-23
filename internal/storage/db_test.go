@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -85,5 +86,36 @@ func TestOutboxActions_RoundTrip(t *testing.T) {
 	}
 	if status != "done" {
 		t.Errorf("status = %q, want %q", status, "done")
+	}
+}
+
+func TestCheckpoint_Succeeds(t *testing.T) {
+	db := openTestDB(t)
+
+	if err := Checkpoint(db); err != nil {
+		t.Fatalf("Checkpoint() error = %v", err)
+	}
+}
+
+func TestCheckpoint_DBError(t *testing.T) {
+	db := openTestDB(t)
+	db.Close()
+
+	if err := Checkpoint(db); err == nil {
+		t.Error("Checkpoint() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestOpen_MigrationFailure_ClosesDBAndReturnsError(t *testing.T) {
+	// A directory can't be opened as a SQLite file, so the first real I/O
+	// migrate() performs fails -- exercising Open's db.Close()-then-return
+	// error path.
+	dir := filepath.Join(t.TempDir(), "subdir")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	if _, err := Open(dir); err == nil {
+		t.Error("Open() error = nil, want an error for a directory path")
 	}
 }

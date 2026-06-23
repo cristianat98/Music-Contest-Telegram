@@ -246,3 +246,69 @@ func TestEnsureDisplayOrderAssigned_StableAcrossRetries(t *testing.T) {
 		}
 	}
 }
+
+// committedTx returns an already-committed transaction: any further
+// operation against it fails with "sql: transaction has already been
+// committed or rolled back", a cheap way to exercise a tx-taking
+// function's DB-error branches without per-call fault injection.
+func committedTx(t *testing.T, db *sql.DB) *sql.Tx {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+	return tx
+}
+
+func TestSongsCollectionComplete_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if _, err := (&SongsHooks{}).SongsCollectionComplete(context.Background(), db, 1); err == nil {
+		t.Error("SongsCollectionComplete() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestPublishDueSongs_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if err := PublishDueSongs(context.Background(), db, &fakeNotifier{}); err == nil {
+		t.Error("PublishDueSongs() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestCloseSongsCollection_TxError(t *testing.T) {
+	_, db := openTestEngine(t)
+	ctx := context.Background()
+
+	if err := (&SongsHooks{}).CloseSongsCollection(ctx, committedTx(t, db), 1, true); err == nil {
+		t.Error("CloseSongsCollection(forced) error = nil, want an error from the finalized tx")
+	}
+	if err := (&SongsHooks{}).CloseSongsCollection(ctx, committedTx(t, db), 1, false); err == nil {
+		t.Error("CloseSongsCollection(unforced) error = nil, want an error from the finalized tx")
+	}
+}
+
+func TestStrikeMissingSubmitters_TxError(t *testing.T) {
+	_, db := openTestEngine(t)
+	if err := strikeMissingSubmitters(context.Background(), committedTx(t, db), 1); err == nil {
+		t.Error("strikeMissingSubmitters() error = nil, want an error from the finalized tx")
+	}
+}
+
+func TestEnsureDisplayOrderAssigned_TxError(t *testing.T) {
+	_, db := openTestEngine(t)
+	if err := ensureDisplayOrderAssigned(context.Background(), committedTx(t, db), 1); err == nil {
+		t.Error("ensureDisplayOrderAssigned() error = nil, want an error from the finalized tx")
+	}
+}
+
+func TestProcessPublishSongsAction_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if err := processPublishSongsAction(context.Background(), db, &fakeNotifier{}, 1, `{"week_id":1}`); err == nil {
+		t.Error("processPublishSongsAction() error = nil, want an error from the closed DB")
+	}
+}

@@ -303,9 +303,138 @@ func TestPublishDueResults_SendsAndMarksDone(t *testing.T) {
 	}
 }
 
+func TestProcessPartialNotices_SendsAndMarksDone(t *testing.T) {
+	e, db, weekID, ids := setupResultsCollectionWeek(t, 3)
+	ctx := context.Background()
+
+	answerAllQuizzes(t, ctx, db, weekID, ids[0], false)
+	rankAllRemaining(t, ctx, db, weekID, ids[0])
+	// ids[1] and ids[2] leave their ranking/questionnaire incomplete.
+
+	if _, err := e.ForceAdvance(ctx); err != nil {
+		t.Fatalf("ForceAdvance() error = %v", err)
+	}
+
+	notifier := &fakeNotifier{}
+	if err := ProcessPartialNotices(ctx, db, notifier); err != nil {
+		t.Fatalf("ProcessPartialNotices() error = %v", err)
+	}
+
+	if len(notifier.messages) != 2 {
+		t.Fatalf("messages sent = %d, want 2", len(notifier.messages))
+	}
+
+	var doneCount int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM outbox_actions WHERE action_type = ? AND status = 'done'", OutboxActionPartialNotice,
+	).Scan(&doneCount); err != nil {
+		t.Fatalf("count done partial notices: %v", err)
+	}
+	if doneCount != 2 {
+		t.Errorf("done partial notices = %d, want 2", doneCount)
+	}
+}
+
+func TestOpenResultsCollection_TxError(t *testing.T) {
+	_, db := openTestEngine(t)
+	if err := (&ResultsHooks{}).OpenResultsCollection(context.Background(), committedTx(t, db), 1); err == nil {
+		t.Error("OpenResultsCollection() error = nil, want an error from the finalized tx")
+	}
+}
+
+func TestCloseResultsCollection_TxError(t *testing.T) {
+	_, db := openTestEngine(t)
+	ctx := context.Background()
+
+	if err := (&ResultsHooks{}).CloseResultsCollection(ctx, committedTx(t, db), 1, true); err == nil {
+		t.Error("CloseResultsCollection(forced) error = nil, want an error from the finalized tx")
+	}
+	if err := (&ResultsHooks{}).CloseResultsCollection(ctx, committedTx(t, db), 1, false); err == nil {
+		t.Error("CloseResultsCollection(unforced) error = nil, want an error from the finalized tx")
+	}
+}
+
+func TestResultsCollectionComplete_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if _, err := (&ResultsHooks{}).ResultsCollectionComplete(context.Background(), db, 1); err == nil {
+		t.Error("ResultsCollectionComplete() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestRecordQuizAnswer_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if err := RecordQuizAnswer(context.Background(), db, 1, 1, 1, false); err == nil {
+		t.Error("RecordQuizAnswer() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestRecordRankingPick_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if err := RecordRankingPick(context.Background(), db, 1, 1, 1); err == nil {
+		t.Error("RecordRankingPick() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestPublishDueResults_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if err := PublishDueResults(context.Background(), db, &fakeNotifier{}); err == nil {
+		t.Error("PublishDueResults() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestProcessPartialNotices_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if err := ProcessPartialNotices(context.Background(), db, &fakeNotifier{}); err == nil {
+		t.Error("ProcessPartialNotices() error = nil, want an error from the closed DB")
+	}
+}
+
 func (f *fakeNotifier) SendPrivateMessage(ctx context.Context, telegramUserID int64, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.messages = append(f.messages, text)
 	return nil
+}
+
+func TestParticipantDone_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if _, err := participantDone(context.Background(), db, 1, 1); err == nil {
+		t.Error("participantDone() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestProcessPublishResultsAction_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if err := processPublishResultsAction(context.Background(), db, &fakeNotifier{}, 1, `{"week_id":1}`); err == nil {
+		t.Error("processPublishResultsAction() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestProcessPartialNoticeAction_DBError(t *testing.T) {
+	_, db := openTestEngine(t)
+	db.Close()
+	if err := processPartialNoticeAction(context.Background(), db, &fakeNotifier{}, 1, `{"week_id":1,"participant_id":1}`); err == nil {
+		t.Error("processPartialNoticeAction() error = nil, want an error from the closed DB")
+	}
+}
+
+func TestDiscardAndStrikeParticipant_TxError(t *testing.T) {
+	_, db := openTestEngine(t)
+	if err := discardAndStrikeParticipant(context.Background(), committedTx(t, db), 1, 1); err == nil {
+		t.Error("discardAndStrikeParticipant() error = nil, want an error from the finalized tx")
+	}
+}
+
+func TestDisqualifyOverfamiliarSongs_TxError(t *testing.T) {
+	_, db := openTestEngine(t)
+	if err := disqualifyOverfamiliarSongs(context.Background(), committedTx(t, db), 1); err == nil {
+		t.Error("disqualifyOverfamiliarSongs() error = nil, want an error from the finalized tx")
+	}
 }
