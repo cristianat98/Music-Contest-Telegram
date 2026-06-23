@@ -1,38 +1,22 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: v4.6.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+      - id: check-yaml
       - id: check-added-large-files
       - id: check-merge-conflict
-      - id: check-yaml
-      - id: mixed-line-ending
+
+  - repo: https://github.com/TekWizely/pre-commit-golang
+    rev: v1.0.0-rc.4
+    hooks:
+      - id: go-fmt
+      - id: go-vet-mod
+      - id: go-build-mod
 
   - repo: local
     hooks:
-      - id: gofmt
-        name: gofmt
-        entry: scripts/gofmt-check.sh
-        language: system
-        types: [go]
-        pass_filenames: true
-        description: Fails if any Go file is not gofmt-formatted.
-
-      - id: go-vet
-        name: go vet
-        entry: go vet ./...
-        language: system
-        types: [go]
-        pass_filenames: false
-
-      - id: go-build
-        name: go build
-        entry: go build ./...
-        language: system
-        types: [go]
-        pass_filenames: false
-
       - id: go-test
         name: go test -short
         entry: go test -short ./...
@@ -40,12 +24,10 @@ repos:
         types: [go]
         pass_filenames: false
 
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.12.2
+    hooks:
       - id: golangci-lint
-        name: golangci-lint
-        entry: golangci-lint run
-        language: system
-        types: [go]
-        pass_filenames: false
 
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v3.6.0
