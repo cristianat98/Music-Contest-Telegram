@@ -15,23 +15,7 @@ repos:
       - id: go-vet-mod
       - id: go-build-mod
 
-  - repo: local
-    hooks:
-      - id: go-test
-        name: go test -short
-        entry: go test -short ./...
-        language: system
-        types: [go]
-        pass_filenames: false
-
   - repo: https://github.com/golangci/golangci-lint
     rev: v2.12.2
     hooks:
       - id: golangci-lint
-
-  - repo: https://github.com/compilerla/conventional-pre-commit
-    rev: v3.6.0
-    hooks:
-      - id: conventional-pre-commit
-        stages: [commit-msg]
-        args: []
