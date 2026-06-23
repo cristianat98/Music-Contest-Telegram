@@ -428,33 +428,13 @@ func RecordRankingPick(ctx context.Context, db *sql.DB, weekID, participantID, s
 // the final per-song/per-participant points and familiarity announcement
 // (R26) and posting it to the group.
 func PublishDueResults(ctx context.Context, db *sql.DB, notifier ResultsNotifier) error {
-	type pending struct {
-		id      int64
-		payload string
-	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT id, payload_json FROM outbox_actions WHERE action_type = ? AND status IN ('pending', 'in_progress')
-	`, OutboxActionPublishResults)
+	actions, err := ListPendingOutboxActions(ctx, db, OutboxActionPublishResults)
 	if err != nil {
-		return fmt.Errorf("contest: list pending publish_results actions: %w", err)
-	}
-	var actions []pending
-	for rows.Next() {
-		var p pending
-		if err := rows.Scan(&p.id, &p.payload); err != nil {
-			rows.Close()
-			return fmt.Errorf("contest: scan publish_results action: %w", err)
-		}
-		actions = append(actions, p)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
 		return err
 	}
-	rows.Close()
 
 	for _, a := range actions {
-		if err := processPublishResultsAction(ctx, db, notifier, a.id, a.payload); err != nil {
+		if err := processPublishResultsAction(ctx, db, notifier, a.ID, a.Payload); err != nil {
 			return err
 		}
 	}
@@ -503,33 +483,13 @@ func processPublishResultsAction(ctx context.Context, db *sql.DB, notifier Resul
 // rows: privately telling a participant their incomplete ranking/
 // questionnaire wasn't counted after a forced close (R25).
 func ProcessPartialNotices(ctx context.Context, db *sql.DB, notifier ResultsNotifier) error {
-	type pending struct {
-		id      int64
-		payload string
-	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT id, payload_json FROM outbox_actions WHERE action_type = ? AND status IN ('pending', 'in_progress')
-	`, OutboxActionPartialNotice)
+	actions, err := ListPendingOutboxActions(ctx, db, OutboxActionPartialNotice)
 	if err != nil {
-		return fmt.Errorf("contest: list pending partial notices: %w", err)
-	}
-	var actions []pending
-	for rows.Next() {
-		var p pending
-		if err := rows.Scan(&p.id, &p.payload); err != nil {
-			rows.Close()
-			return fmt.Errorf("contest: scan partial notice action: %w", err)
-		}
-		actions = append(actions, p)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
 		return err
 	}
-	rows.Close()
 
 	for _, a := range actions {
-		if err := processPartialNoticeAction(ctx, db, notifier, a.id, a.payload); err != nil {
+		if err := processPartialNoticeAction(ctx, db, notifier, a.ID, a.Payload); err != nil {
 			return err
 		}
 	}

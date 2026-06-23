@@ -257,6 +257,7 @@ func committedTx(t *testing.T, db *sql.DB) *sql.Tx {
 	if err != nil {
 		t.Fatalf("begin tx: %v", err)
 	}
+	defer tx.Rollback()
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit tx: %v", err)
 	}

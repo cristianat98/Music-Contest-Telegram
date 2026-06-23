@@ -128,33 +128,13 @@ type submissionRow struct {
 // Safe to call on every tick; idempotent per outbox row via the
 // pending->in_progress->done lifecycle (KTD4).
 func PublishDueSongs(ctx context.Context, db *sql.DB, notifier GroupNotifier) error {
-	rows, err := db.QueryContext(ctx, `
-		SELECT id, payload_json FROM outbox_actions WHERE action_type = ? AND status IN ('pending', 'in_progress')
-	`, OutboxActionPublishSongs)
+	actions, err := ListPendingOutboxActions(ctx, db, OutboxActionPublishSongs)
 	if err != nil {
-		return fmt.Errorf("contest: list pending publish_songs actions: %w", err)
-	}
-	type pending struct {
-		id      int64
-		payload string
-	}
-	var actions []pending
-	for rows.Next() {
-		var p pending
-		if err := rows.Scan(&p.id, &p.payload); err != nil {
-			rows.Close()
-			return fmt.Errorf("contest: scan publish_songs action: %w", err)
-		}
-		actions = append(actions, p)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
 		return err
 	}
-	rows.Close()
 
 	for _, a := range actions {
-		if err := processPublishSongsAction(ctx, db, notifier, a.id, a.payload); err != nil {
+		if err := processPublishSongsAction(ctx, db, notifier, a.ID, a.Payload); err != nil {
 			return err
 		}
 	}

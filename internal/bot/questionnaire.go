@@ -23,34 +23,14 @@ const quizCallbackPrefix = "q|"
 // chains into sendNextRankingPrompt once a participant's questions are
 // exhausted.
 func (a *App) ProcessResultsPrompts(ctx context.Context) error {
-	type pending struct {
-		id      int64
-		payload string
-	}
-	rows, err := a.DB.QueryContext(ctx, `
-		SELECT id, payload_json FROM outbox_actions WHERE action_type = ? AND status IN ('pending', 'in_progress')
-	`, contest.OutboxActionStartResultsPrompt)
+	actions, err := contest.ListPendingOutboxActions(ctx, a.DB, contest.OutboxActionStartResultsPrompt)
 	if err != nil {
-		return fmt.Errorf("bot: list pending start_results_prompt actions: %w", err)
-	}
-	var actions []pending
-	for rows.Next() {
-		var p pending
-		if err := rows.Scan(&p.id, &p.payload); err != nil {
-			rows.Close()
-			return fmt.Errorf("bot: scan start_results_prompt action: %w", err)
-		}
-		actions = append(actions, p)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
 		return err
 	}
-	rows.Close()
 
 	for _, act := range actions {
-		if err := a.processStartResultsPromptAction(ctx, act.id, act.payload); err != nil {
-			log.Printf("bot: start_results_prompt action %d failed: %v", act.id, err)
+		if err := a.processStartResultsPromptAction(ctx, act.ID, act.Payload); err != nil {
+			log.Printf("bot: start_results_prompt action %d failed: %v", act.ID, err)
 			continue
 		}
 	}
