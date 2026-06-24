@@ -15,3 +15,7 @@ used as the commit message convention, driving automatic semver tagging
 on merge to `master`: a `feat:` commit bumps the minor version, `fix:`
 bumps patch, and a `BREAKING CHANGE:` footer (or `!` after the type) bumps
 major. This is no longer enforced locally by a pre-commit hook.
+
+Each new tag triggers [GoReleaser](https://goreleaser.com) to publish a
+GitHub Release with `linux/amd64` and `linux/arm64` binaries attached (see
+`.goreleaser.yaml`).
