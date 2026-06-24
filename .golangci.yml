@@ -1,0 +1,31 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    errcheck:
+      # Checking the return value of a deferred cleanup call adds little
+      # value and is not the idiom used elsewhere in the Go ecosystem.
+      exclude-functions:
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+  exclusions:
+    paths:
+      - bin
+    rules:
+      # Test files routinely ignore Scan/Close/Write errors on seed/
+      # assertion helpers for brevity; that tradeoff doesn't apply to
+      # production code.
+      - path: _test\.go
+        linters:
+          - errcheck
