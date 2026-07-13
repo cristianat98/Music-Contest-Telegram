@@ -114,9 +114,17 @@ func TestSongsHooks_CloseForced_StrikesMissingAndEnqueuesPublish(t *testing.T) {
 		t.Fatalf("ForceAdvance() error = %v", err)
 	}
 
-	var strikes int
-	if err := db.QueryRow("SELECT strikes FROM participants WHERE id != ?", firstParticipant).Scan(&strikes); err != nil {
-		t.Fatalf("query strikes: %v", err)
+	var contestID, straggler int64
+	if err := db.QueryRow("SELECT id FROM contests WHERE active = 1").Scan(&contestID); err != nil {
+		t.Fatalf("query active contest: %v", err)
+	}
+	if err := db.QueryRow("SELECT id FROM participants WHERE id != ?", firstParticipant).Scan(&straggler); err != nil {
+		t.Fatalf("query straggler id: %v", err)
+	}
+
+	strikes, err := StrikesForParticipant(ctx, db, contestID, straggler)
+	if err != nil {
+		t.Fatalf("StrikesForParticipant() error = %v", err)
 	}
 	if strikes != 1 {
 		t.Errorf("strikes for straggler = %d, want 1", strikes)
@@ -242,7 +250,7 @@ func TestEnsureDisplayOrderAssigned_StableAcrossRetries(t *testing.T) {
 	}
 	for i := range first {
 		if first[i] != second[i] {
-			t.Errorf("display_order changed on retry at index %d: %q vs %q", i, first[i], second[i])
+			t.Errorf("display_name changed on retry at index %d: %q vs %q", i, first[i], second[i])
 		}
 	}
 }
@@ -289,13 +297,6 @@ func TestCloseSongsCollection_TxError(t *testing.T) {
 	}
 	if err := (&SongsHooks{}).CloseSongsCollection(ctx, committedTx(t, db), 1, false); err == nil {
 		t.Error("CloseSongsCollection(unforced) error = nil, want an error from the finalized tx")
-	}
-}
-
-func TestStrikeMissingSubmitters_TxError(t *testing.T) {
-	_, db := openTestEngine(t)
-	if err := strikeMissingSubmitters(context.Background(), committedTx(t, db), 1); err == nil {
-		t.Error("strikeMissingSubmitters() error = nil, want an error from the finalized tx")
 	}
 }
 

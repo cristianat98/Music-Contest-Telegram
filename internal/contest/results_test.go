@@ -220,11 +220,19 @@ func TestForcedClose_DiscardsPartialRankingAndStrikesOnce(t *testing.T) {
 		t.Fatalf("ForceAdvance() error = %v", err)
 	}
 
+	var contestID int64
+	if err := db.QueryRow("SELECT id FROM contests WHERE active = 1").Scan(&contestID); err != nil {
+		t.Fatalf("query active contest: %v", err)
+	}
+
 	for _, strugglerID := range []int64{ids[1], ids[2]} {
-		var strikes, voteCount int
-		db.QueryRow("SELECT strikes FROM participants WHERE id = ?", strugglerID).Scan(&strikes)
+		var voteCount int
 		db.QueryRow("SELECT COUNT(*) FROM votes WHERE week_id = ? AND voter_id = ?", weekID, strugglerID).Scan(&voteCount)
 
+		strikes, err := StrikesForParticipant(ctx, db, contestID, strugglerID)
+		if err != nil {
+			t.Fatalf("StrikesForParticipant() error = %v", err)
+		}
 		if strikes != 1 {
 			t.Errorf("participant %d strikes = %d, want exactly 1 (R24: one strike regardless of which parts missing)", strugglerID, strikes)
 		}
@@ -233,8 +241,10 @@ func TestForcedClose_DiscardsPartialRankingAndStrikesOnce(t *testing.T) {
 		}
 	}
 
-	var completerStrikes int
-	db.QueryRow("SELECT strikes FROM participants WHERE id = ?", ids[0]).Scan(&completerStrikes)
+	completerStrikes, err := StrikesForParticipant(ctx, db, contestID, ids[0])
+	if err != nil {
+		t.Fatalf("StrikesForParticipant() error = %v", err)
+	}
 	if completerStrikes != 0 {
 		t.Errorf("completer strikes = %d, want 0", completerStrikes)
 	}
@@ -245,6 +255,66 @@ func TestForcedClose_DiscardsPartialRankingAndStrikesOnce(t *testing.T) {
 	).Scan(&noticeCount)
 	if noticeCount != 2 {
 		t.Errorf("pending partial notices = %d, want 2", noticeCount)
+	}
+}
+
+func TestFinalResults_DepartedSubmitterZeroedAndMarked(t *testing.T) {
+	e, db, weekID, ids := setupResultsCollectionWeek(t, 3)
+	ctx := context.Background()
+
+	var contestID int64
+	db.QueryRow("SELECT id FROM contests WHERE active = 1").Scan(&contestID)
+
+	// ids[1] departs the contest after submitting and being ranked by others,
+	// but before results close.
+	if _, err := db.Exec(
+		"UPDATE contest_participants SET left_at = datetime('now') WHERE contest_id = ? AND participant_id = ?",
+		contestID, ids[1],
+	); err != nil {
+		t.Fatalf("mark participant departed: %v", err)
+	}
+
+	// Only the still-active participants (ids[0], ids[2]) are required to
+	// finish for a natural close.
+	for _, p := range []int64{ids[0], ids[2]} {
+		answerAllQuizzes(t, ctx, db, weekID, p, false)
+		rankAllRemaining(t, ctx, db, weekID, p)
+	}
+
+	hooks := NewResultsHooks(db)
+	complete, err := hooks.ResultsCollectionComplete(ctx, db, weekID)
+	if err != nil {
+		t.Fatalf("ResultsCollectionComplete() error = %v", err)
+	}
+	if !complete {
+		t.Fatal("expected complete: the departed participant should not block natural close")
+	}
+
+	if _, err := e.ForceAdvance(ctx); err != nil {
+		t.Fatalf("ForceAdvance() error = %v", err)
+	}
+
+	results, err := FinalResults(ctx, db, weekID)
+	if err != nil {
+		t.Fatalf("FinalResults() error = %v", err)
+	}
+
+	var departedResult *SubmissionResult
+	for i := range results {
+		var ownerID int64
+		db.QueryRow("SELECT participant_id FROM submissions WHERE url = ?", results[i].URL).Scan(&ownerID)
+		if ownerID == ids[1] {
+			departedResult = &results[i]
+		}
+	}
+	if departedResult == nil {
+		t.Fatal("could not find departed participant's submission in final results")
+	}
+	if !departedResult.Departed {
+		t.Error("expected departed submitter's result to be marked Departed")
+	}
+	if departedResult.Points != 0 {
+		t.Errorf("departed submitter's points = %d, want 0", departedResult.Points)
 	}
 }
 
@@ -427,8 +497,8 @@ func TestProcessPartialNoticeAction_DBError(t *testing.T) {
 
 func TestDiscardAndStrikeParticipant_TxError(t *testing.T) {
 	_, db := openTestEngine(t)
-	if err := discardAndStrikeParticipant(context.Background(), committedTx(t, db), 1, 1); err == nil {
-		t.Error("discardAndStrikeParticipant() error = nil, want an error from the finalized tx")
+	if err := discardParticipant(context.Background(), committedTx(t, db), 1, 1); err == nil {
+		t.Error("discardParticipant() error = nil, want an error from the finalized tx")
 	}
 }
 

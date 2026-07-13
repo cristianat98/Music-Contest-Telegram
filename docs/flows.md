@@ -16,9 +16,16 @@ stateDiagram-v2
   }
 ```
 
-`/startcontest` resets every participant's strike count and the new
-contest's topic pool (KTD7, R10, R12) -- the pool reset falls out of the
-schema for free, since `topic_usage` rows are scoped per `contest_id`.
+`/startcontest` enrolls every currently-active Telegram participant into
+`contest_participants` (no later joiners) and associates the seeded
+`"normal"` topic so the new contest's catalog is never empty (R1, R16).
+Strikes are never reset -- they're computed per contest from
+`contest_participants`/`weeks`/`submissions`/`votes`/`quiz_answers`, so a new
+contest naturally starts at zero without any explicit reset step. When a
+participant leaves the Telegram group, `contest_participants.active` flips
+false for whichever contest is active (R3): they stop blocking week
+completion and their contribution is zeroed/marked in results, without
+erasing what they already did.
 
 ## Tick (every 15 minutes, plus once on startup)
 
@@ -42,18 +49,18 @@ concurrent `/forceadvance`.
 
 ```mermaid
 flowchart TB
-  Start["/startweek: pick random unused topic, snapshot required participants"] --> Open[songs_collection open]
-  Open --> Submit[Participant sends a YouTube URL privately]
+  Start["/startweek: pick topic from contest's associated subset\n(prefer unused, fall back to repeat)"] --> Open[songs_collection open]
+  Open --> Submit["Participant sends a YouTube URL privately\n(accepted only while songs_collection is open --\nsame window /fixsubmission, /removesubmission honor)"]
   Submit --> Validate{Format-only URL check}
   Validate -->|invalid| Reject[Reply: not a valid URL]
   Validate -->|valid| Store[Upsert submissions row]
-  Store --> CheckComplete{All required participants submitted?}
-  CheckComplete -->|no, deadline not yet hit| Wait[Wait; daily 20:00 reminder lists stragglers]
-  CheckComplete -->|yes| Close[CloseSongsCollection: assign display_order, enqueue publish_songs]
-  Admin["/forceadvance"] --> ForceClose[CloseSongsCollection forced=true: strike stragglers]
+  Store --> CheckComplete{All active contest_participants submitted?}
+  CheckComplete -->|no, deadline not yet hit| Wait[Wait; daily 20:00 reminder lists active stragglers]
+  CheckComplete -->|yes| Close[CloseSongsCollection: assign display_name, enqueue publish_songs]
+  Admin["/forceadvance"] --> ForceClose["CloseSongsCollection forced=true\n(no strike write -- a missing submission for an\nactive participant is already a computable strike)"]
   ForceClose --> Close
   Close --> Transition[advance to results_collection]
-  Transition --> OpenResults[OpenResultsCollection: enqueue start_results_prompt per participant]
+  Transition --> OpenResults[OpenResultsCollection: enqueue start_results_prompt per active participant]
 ```
 
 ## Results collection cycle (results_collection)
@@ -72,12 +79,12 @@ flowchart TB
   MoreRank -->|yes| FirstRank
   MoreRank -->|no| Done[Participant done: questionnaire + ranking complete]
   Done --> CheckAllDone{All required participants done?}
-  CheckAllDone -->|no| WaitR[Wait; no auto-strike until close]
+  CheckAllDone -->|no| WaitR[Wait; incompleteness only becomes a strike at close]
   CheckAllDone -->|yes| CloseNatural[CloseResultsCollection forced=false]
-  AdminForce["/forceadvance"] --> CloseForced[CloseResultsCollection forced=true: discard incomplete ranking, strike once, queue partial-notice]
+  AdminForce["/forceadvance"] --> CloseForced["CloseResultsCollection forced=true: discard incomplete\nranking, queue partial-notice (no strike write --\nthe gap is already a computable strike)"]
   CloseForced --> Disqualify
   CloseNatural --> Disqualify[disqualifyOverfamiliarSongs: zero points for songs known by >=3, no redistribution]
   Disqualify --> EnqueuePublish[Enqueue publish_results]
-  EnqueuePublish --> Announce[bot posts per-song points + familiarity outcome, de-anonymized]
+  EnqueuePublish --> Announce["bot posts per-song points + familiarity outcome, de-anonymized\n(a departed submitter's song shows 0 points + a\n\"left the contest\" marker instead of its real score)"]
   Announce --> Idle[week returns to idle]
 ```

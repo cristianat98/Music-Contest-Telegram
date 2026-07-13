@@ -63,7 +63,11 @@ func NewResultsHooks(db *sql.DB) *ResultsHooks {
 }
 
 func (h *ResultsHooks) OpenResultsCollection(ctx context.Context, tx *sql.Tx, weekID int64) error {
-	participantIDs, err := collectParticipantIDs(ctx, tx, `SELECT participant_id FROM week_participants WHERE week_id = ?`, weekID)
+	participantIDs, err := collectParticipantIDs(ctx, tx, `
+		SELECT cp.participant_id FROM contest_participants cp
+		JOIN weeks w ON w.contest_id = cp.contest_id
+		WHERE w.id = ? AND cp.left_at IS NULL
+	`, weekID)
 	if err != nil {
 		return err
 	}
@@ -132,7 +136,11 @@ func (h *ResultsHooks) ResultsCollectionComplete(ctx context.Context, db *sql.DB
 	// returning: SetMaxOpenConns(1) (KTD2) means only one connection exists
 	// at all, so an open, mid-iteration *Rows would otherwise deadlock
 	// against the nested QueryRowContext calls inside participantDone below.
-	participantIDs, err := collectParticipantIDs(ctx, db, `SELECT participant_id FROM week_participants WHERE week_id = ?`, weekID)
+	participantIDs, err := collectParticipantIDs(ctx, db, `
+		SELECT cp.participant_id FROM contest_participants cp
+		JOIN weeks w ON w.contest_id = cp.contest_id
+		WHERE w.id = ? AND cp.left_at IS NULL
+	`, weekID)
 	if err != nil {
 		return false, err
 	}
@@ -154,7 +162,7 @@ func (h *ResultsHooks) ResultsCollectionComplete(ctx context.Context, db *sql.DB
 
 func (h *ResultsHooks) CloseResultsCollection(ctx context.Context, tx *sql.Tx, weekID int64, forced bool) error {
 	if forced {
-		if err := h.discardAndStrikeIncomplete(ctx, tx, weekID); err != nil {
+		if err := h.discardIncomplete(ctx, tx, weekID); err != nil {
 			return err
 		}
 	}
@@ -175,13 +183,18 @@ func (h *ResultsHooks) CloseResultsCollection(ctx context.Context, tx *sql.Tx, w
 	return nil
 }
 
-// discardAndStrikeIncomplete implements R24/R25/R28 for a forced close:
-// any required participant not done gets their partial ranking discarded
-// entirely (not partially scored), exactly one strike regardless of which
-// part(s) were missing, and a queued private notice (R25).
-func (h *ResultsHooks) discardAndStrikeIncomplete(ctx context.Context, tx *sql.Tx, weekID int64) error {
+// discardIncomplete implements R24/R25/R28 for a forced close: any
+// obligated participant not done gets their partial ranking discarded
+// entirely (not partially scored) and a queued private notice (R25). No
+// guard flag or strike increment is needed here: deleting an incomplete
+// participant's votes is naturally idempotent (deleting zero rows twice is
+// a no-op), and the missed-results strike itself is a permanent, computable
+// fact once the week closes (R7-R9; see StrikesForParticipant).
+func (h *ResultsHooks) discardIncomplete(ctx context.Context, tx *sql.Tx, weekID int64) error {
 	participantIDs, err := collectParticipantIDs(ctx, tx, `
-		SELECT participant_id FROM week_participants WHERE week_id = ? AND results_struck = 0
+		SELECT cp.participant_id FROM contest_participants cp
+		JOIN weeks w ON w.contest_id = cp.contest_id
+		WHERE w.id = ? AND cp.left_at IS NULL
 	`, weekID)
 	if err != nil {
 		return err
@@ -195,33 +208,21 @@ func (h *ResultsHooks) discardAndStrikeIncomplete(ctx context.Context, tx *sql.T
 		if done {
 			continue
 		}
-		if err := discardAndStrikeParticipant(ctx, tx, weekID, participantID); err != nil {
+		if err := discardParticipant(ctx, tx, weekID, participantID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// discardAndStrikeParticipant discards one participant's partial ranking,
-// records their strike, and queues their partial-progress notice (R24,
-// R25, R28), for a single participant found incomplete by
-// discardAndStrikeIncomplete.
-func discardAndStrikeParticipant(ctx context.Context, tx *sql.Tx, weekID, participantID int64) error {
+// discardParticipant discards one participant's partial ranking
+// and queues their partial-progress notice (R24, R25), for a single
+// participant found incomplete by discardIncomplete.
+func discardParticipant(ctx context.Context, tx *sql.Tx, weekID, participantID int64) error {
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM votes WHERE week_id = ? AND voter_id = ?
 	`, weekID, participantID); err != nil {
 		return fmt.Errorf("contest: discard partial ranking for %d: %w", participantID, err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE week_participants SET results_struck = 1 WHERE week_id = ? AND participant_id = ?
-	`, weekID, participantID); err != nil {
-		return fmt.Errorf("contest: mark results_struck for %d: %w", participantID, err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE participants SET strikes = strikes + 1 WHERE id = ?
-	`, participantID); err != nil {
-		return fmt.Errorf("contest: increment strikes for %d: %w", participantID, err)
 	}
 
 	payload, err := json.Marshal(map[string]any{"week_id": weekID, "participant_id": participantID})
@@ -275,29 +276,37 @@ func disqualifyOverfamiliarSongs(ctx context.Context, tx *sql.Tx, weekID int64) 
 }
 
 // SubmissionResult is one song's final standing for the results
-// announcement: its submitter, total points, and familiarity outcome.
+// announcement: its submitter, total points, familiarity outcome, and
+// whether the submitter had no obligations in the contest by the time
+// results were computed (R5) -- a separate reason from Disqualified, since
+// the two aren't mutually exclusive.
 type SubmissionResult struct {
 	SubmitterName string
 	URL           string
 	Points        int
 	KnownCount    int
 	Disqualified  bool
+	Departed      bool
 }
 
 // FinalResults computes the per-song results for a week: total points
 // (after disqualification zeroing), how many participants already knew
-// each song, and the submitter's name (results de-anonymize submitters,
-// unlike the songs_collection publication, since points must be
-// attributed to someone) (R26).
+// each song, the submitter's name (results de-anonymize submitters, unlike
+// the songs_collection publication, since points must be attributed to
+// someone), and whether the submitter has since departed the contest
+// (R5, R26).
 func FinalResults(ctx context.Context, db *sql.DB, weekID int64) ([]SubmissionResult, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT s.id, s.url, p.display_name,
 			COALESCE((SELECT SUM(v.points) FROM votes v WHERE v.submission_id = s.id), 0),
-			(SELECT COUNT(*) FROM quiz_answers q WHERE q.submission_id = s.id AND q.already_knew = 1)
+			(SELECT COUNT(*) FROM quiz_answers q WHERE q.submission_id = s.id AND q.already_knew = 1),
+			CASE WHEN cp.left_at IS NULL THEN 0 ELSE 1 END
 		FROM submissions s
 		JOIN participants p ON p.id = s.participant_id
+		JOIN weeks w ON w.id = s.week_id
+		LEFT JOIN contest_participants cp ON cp.contest_id = w.contest_id AND cp.participant_id = s.participant_id
 		WHERE s.week_id = ?
-		ORDER BY s.display_order
+		ORDER BY s.display_name
 	`, weekID)
 	if err != nil {
 		return nil, fmt.Errorf("contest: query final results: %w", err)
@@ -308,10 +317,13 @@ func FinalResults(ctx context.Context, db *sql.DB, weekID int64) ([]SubmissionRe
 	for rows.Next() {
 		var submissionID int64
 		var r SubmissionResult
-		if err := rows.Scan(&submissionID, &r.URL, &r.SubmitterName, &r.Points, &r.KnownCount); err != nil {
+		if err := rows.Scan(&submissionID, &r.URL, &r.SubmitterName, &r.Points, &r.KnownCount, &r.Departed); err != nil {
 			return nil, fmt.Errorf("contest: scan final result row: %w", err)
 		}
 		r.Disqualified = r.KnownCount >= disqualifyThreshold
+		if r.Departed {
+			r.Points = 0
+		}
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -342,12 +354,12 @@ type SubmissionRef struct {
 // for, in display order.
 func PendingQuizSubmissions(ctx context.Context, db *sql.DB, weekID, participantID int64) ([]SubmissionRef, error) {
 	return pendingSubmissions(ctx, db, weekID, participantID, `
-		SELECT s.id, s.display_order, s.url FROM submissions s
+		SELECT s.id, s.display_name, s.url FROM submissions s
 		WHERE s.week_id = ? AND s.participant_id != ?
 		AND s.id NOT IN (
 			SELECT submission_id FROM quiz_answers WHERE week_id = ? AND participant_id = ?
 		)
-		ORDER BY s.display_order
+		ORDER BY s.display_name
 	`)
 }
 
@@ -355,12 +367,12 @@ func PendingQuizSubmissions(ctx context.Context, db *sql.DB, weekID, participant
 // participant's own) they haven't yet ranked, in display order.
 func PendingRankingSubmissions(ctx context.Context, db *sql.DB, weekID, participantID int64) ([]SubmissionRef, error) {
 	return pendingSubmissions(ctx, db, weekID, participantID, `
-		SELECT s.id, s.display_order, s.url FROM submissions s
+		SELECT s.id, s.display_name, s.url FROM submissions s
 		WHERE s.week_id = ? AND s.participant_id != ?
 		AND s.id NOT IN (
 			SELECT submission_id FROM votes WHERE week_id = ? AND voter_id = ?
 		)
-		ORDER BY s.display_order
+		ORDER BY s.display_name
 	`)
 }
 
@@ -460,11 +472,16 @@ func processPublishResultsAction(ctx context.Context, db *sql.DB, notifier Resul
 
 	text := "Results are in!\n"
 	for i, r := range results {
-		if r.Disqualified {
+		switch {
+		case r.Disqualified && r.Departed:
+			text += fmt.Sprintf("%d. %s (%s) -- disqualified, known by %d participants beforehand; submitter also left the contest\n", i+1, r.SubmitterName, r.URL, r.KnownCount)
+		case r.Disqualified:
 			text += fmt.Sprintf("%d. %s (%s) -- disqualified, known by %d participants beforehand\n", i+1, r.SubmitterName, r.URL, r.KnownCount)
-			continue
+		case r.Departed:
+			text += fmt.Sprintf("%d. %s (%s) -- 0 points, submitter left the contest\n", i+1, r.SubmitterName, r.URL)
+		default:
+			text += fmt.Sprintf("%d. %s (%s) -- %d points, known by %d beforehand\n", i+1, r.SubmitterName, r.URL, r.Points, r.KnownCount)
 		}
-		text += fmt.Sprintf("%d. %s (%s) -- %d points, known by %d beforehand\n", i+1, r.SubmitterName, r.URL, r.Points, r.KnownCount)
 	}
 
 	if err := notifier.SendGroupMessage(ctx, text); err != nil {

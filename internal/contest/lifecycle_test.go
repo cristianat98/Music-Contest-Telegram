@@ -43,7 +43,7 @@ func seedTopic(t *testing.T, db *sql.DB, text string) {
 	}
 }
 
-func TestStartContest_DeactivatesPreviousAndResetsStrikesAndTopics(t *testing.T) {
+func TestStartContest_DeactivatesPreviousAndIsolatesStrikesAndTopics(t *testing.T) {
 	ctx := context.Background()
 	e, db := openTestEngine(t)
 
@@ -53,15 +53,34 @@ func TestStartContest_DeactivatesPreviousAndResetsStrikesAndTopics(t *testing.T)
 	if _, err := e.StartContest(ctx, "Contest One"); err != nil {
 		t.Fatalf("StartContest() error = %v", err)
 	}
-	if _, err := db.Exec("UPDATE participants SET strikes = 3"); err != nil {
-		t.Fatalf("seed strikes: %v", err)
-	}
 	if _, err := e.StartWeek(ctx); err != nil {
 		t.Fatalf("StartWeek() error = %v", err)
 	}
 
-	// AE6: starting a new contest deactivates the old one and resets strikes
-	// and the topic pool.
+	// Force Contest One's week closed with nobody having submitted, so
+	// participant 1000 accrues a missed-submission strike in Contest One.
+	if _, err := e.ForceAdvance(ctx); err != nil {
+		t.Fatalf("ForceAdvance() error = %v", err)
+	}
+
+	var contestOneID, participantID int64
+	if err := db.QueryRow("SELECT id FROM contests WHERE name = ?", "Contest One").Scan(&contestOneID); err != nil {
+		t.Fatalf("look up contest one id: %v", err)
+	}
+	if err := db.QueryRow("SELECT id FROM participants WHERE telegram_user_id = 1000").Scan(&participantID); err != nil {
+		t.Fatalf("look up participant id: %v", err)
+	}
+
+	strikesOne, err := StrikesForParticipant(ctx, db, contestOneID, participantID)
+	if err != nil {
+		t.Fatalf("StrikesForParticipant() error = %v", err)
+	}
+	if strikesOne == 0 {
+		t.Fatal("expected at least one strike in Contest One after a forced close with no submission")
+	}
+
+	// AE6: starting a new contest deactivates the old one; strikes and the
+	// topic pool are naturally scoped per contest, with nothing to reset.
 	if _, err := e.StartContest(ctx, "Contest Two"); err != nil {
 		t.Fatalf("second StartContest() error = %v", err)
 	}
@@ -74,12 +93,17 @@ func TestStartContest_DeactivatesPreviousAndResetsStrikesAndTopics(t *testing.T)
 		t.Errorf("active contest count = %d, want 1", activeCount)
 	}
 
-	var strikes int
-	if err := db.QueryRow("SELECT strikes FROM participants LIMIT 1").Scan(&strikes); err != nil {
-		t.Fatalf("query strikes: %v", err)
+	var contestTwoID int64
+	if err := db.QueryRow("SELECT id FROM contests WHERE name = ?", "Contest Two").Scan(&contestTwoID); err != nil {
+		t.Fatalf("look up contest two id: %v", err)
 	}
-	if strikes != 0 {
-		t.Errorf("strikes = %d, want 0 after new contest start", strikes)
+
+	strikesTwo, err := StrikesForParticipant(ctx, db, contestTwoID, participantID)
+	if err != nil {
+		t.Fatalf("StrikesForParticipant() error = %v", err)
+	}
+	if strikesTwo != 0 {
+		t.Errorf("strikes in Contest Two = %d, want 0 (Contest One's strikes don't carry over)", strikesTwo)
 	}
 
 	// The topic used in Contest One's week must be available again in

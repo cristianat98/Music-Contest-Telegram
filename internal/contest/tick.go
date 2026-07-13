@@ -16,7 +16,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	contestID, err := e.activeContestID(ctx, e.db)
+	contestID, err := activeContestID(ctx, e.db)
 	if errors.Is(err, ErrNoActiveContest) {
 		return nil
 	}

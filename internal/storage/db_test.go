@@ -22,7 +22,7 @@ func TestOpen_AppliesMigrations(t *testing.T) {
 	db := openTestDB(t)
 
 	tables := []string{
-		"contests", "topics", "topic_usage", "participants", "weeks", "week_participants",
+		"contests", "topics", "topic_usage", "participants", "contest_participants", "weeks",
 		"submissions", "votes", "quiz_answers", "outbox_actions",
 	}
 	for _, table := range tables {
@@ -31,6 +31,86 @@ func TestOpen_AppliesMigrations(t *testing.T) {
 		if err != nil {
 			t.Errorf("table %q not found after migration: %v", table, err)
 		}
+	}
+}
+
+func TestOpen_SeedsDefaultNormalTopic(t *testing.T) {
+	db := openTestDB(t)
+
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM topics WHERE text = 'normal'").Scan(&count); err != nil {
+		t.Fatalf("query seeded topic: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("seeded 'normal' topic count = %d, want 1", count)
+	}
+}
+
+func hasColumn(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notNull   int
+			dfltValue any
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			t.Fatalf("scan table_info row: %v", err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
+func TestOpen_ParticipantsColumns_NoStrikes(t *testing.T) {
+	db := openTestDB(t)
+	if hasColumn(t, db, "participants", "strikes") {
+		t.Error("participants.strikes should not exist after migration")
+	}
+}
+
+func TestOpen_TopicUsageColumns_SelectableNotUsed(t *testing.T) {
+	db := openTestDB(t)
+	if hasColumn(t, db, "topic_usage", "used") {
+		t.Error("topic_usage.used should not exist after migration")
+	}
+	if !hasColumn(t, db, "topic_usage", "selectable") {
+		t.Error("topic_usage.selectable should exist after migration")
+	}
+}
+
+func TestOpen_SubmissionsColumns_DisplayNameNotDisplayOrder(t *testing.T) {
+	db := openTestDB(t)
+	if hasColumn(t, db, "submissions", "display_order") {
+		t.Error("submissions.display_order should not exist after migration")
+	}
+	if !hasColumn(t, db, "submissions", "display_name") {
+		t.Error("submissions.display_name should exist after migration")
+	}
+}
+
+func TestOpen_ContestParticipantsColumns(t *testing.T) {
+	db := openTestDB(t)
+	for _, col := range []string{"contest_id", "participant_id", "left_at"} {
+		if !hasColumn(t, db, "contest_participants", col) {
+			t.Errorf("contest_participants.%s should exist after migration", col)
+		}
+	}
+	// No separate active flag: obligated is exactly left_at IS NULL, so
+	// there's nothing to keep in sync with it.
+	if hasColumn(t, db, "contest_participants", "active") {
+		t.Error("contest_participants.active should not exist -- obligation is derived from left_at")
 	}
 }
 

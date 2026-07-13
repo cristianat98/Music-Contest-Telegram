@@ -105,8 +105,8 @@ func (a *App) handleFixSubmission(ctx context.Context, b *tgbot.Bot, update *mod
 	}
 
 	week, err := a.Contest.CurrentWeek(ctx)
-	if err != nil || week.State == contest.StateIdle {
-		a.reply(ctx, chatID, "There's no active week to fix a submission for.")
+	if err != nil || week.State != contest.StateSongsCollection {
+		a.reply(ctx, chatID, "Submissions can only be fixed while songs are being collected.")
 		return
 	}
 
@@ -136,8 +136,8 @@ func (a *App) handleRemoveSubmission(ctx context.Context, b *tgbot.Bot, update *
 	}
 
 	week, err := a.Contest.CurrentWeek(ctx)
-	if err != nil || week.State == contest.StateIdle {
-		a.reply(ctx, chatID, "There's no active week to remove a submission from.")
+	if err != nil || week.State != contest.StateSongsCollection {
+		a.reply(ctx, chatID, "Submissions can only be removed while songs are being collected.")
 		return
 	}
 

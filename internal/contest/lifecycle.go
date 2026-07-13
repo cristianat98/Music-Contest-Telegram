@@ -125,7 +125,10 @@ type week struct {
 	deadlineOverrideDays sql.NullInt64
 }
 
-func (e *Engine) activeContestID(ctx context.Context, q querier) (int64, error) {
+// activeContestID is a free function, not an Engine method, so
+// SetParticipantLeft (participants.go) can share it without needing an
+// Engine instance.
+func activeContestID(ctx context.Context, q querier) (int64, error) {
 	var id int64
 	err := q.QueryRowContext(ctx, `SELECT id FROM contests WHERE active = 1`).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -178,7 +181,7 @@ func (e *Engine) CurrentWeek(ctx context.Context) (WeekInfo, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	contestID, err := e.activeContestID(ctx, e.db)
+	contestID, err := activeContestID(ctx, e.db)
 	if errors.Is(err, ErrNoActiveContest) {
 		return WeekInfo{State: StateIdle}, nil
 	}
@@ -202,10 +205,11 @@ func (e *Engine) CurrentWeek(ctx context.Context) (WeekInfo, error) {
 	return info, nil
 }
 
-// StartContest deactivates any previously active contest, resets every
-// participant's strike count, and activates a new contest. The new
-// contest's topic pool starts fully unused because topic_usage rows are
-// keyed by contest_id -- there's nothing to reset (R4, R10, R12; KTD7).
+// StartContest deactivates any previously active contest and activates a
+// new one, enrolling every currently-active participant into it (R1) and
+// associating the seeded default topic so its catalog is never empty (R16).
+// Strikes need no reset: they're computed per-contest from contest_participants
+// and week data, never stored (R9).
 func (e *Engine) StartContest(ctx context.Context, name string) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -219,9 +223,6 @@ func (e *Engine) StartContest(ctx context.Context, name string) (string, error) 
 	if _, err := tx.ExecContext(ctx, `UPDATE contests SET active = 0 WHERE active = 1`); err != nil {
 		return "", fmt.Errorf("contest: deactivate previous contest: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE participants SET strikes = 0`); err != nil {
-		return "", fmt.Errorf("contest: reset strikes: %w", err)
-	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO contests (name, active) VALUES (?, 1)`, name)
 	if err != nil {
 		return "", fmt.Errorf("contest: insert new contest: %w", err)
@@ -231,11 +232,18 @@ func (e *Engine) StartContest(ctx context.Context, name string) (string, error) 
 		return "", fmt.Errorf("contest: read new contest id: %w", err)
 	}
 
+	if err := enrollContestParticipants(ctx, tx, id); err != nil {
+		return "", err
+	}
+	if err := associateDefaultTopic(ctx, tx, id); err != nil {
+		return "", err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("contest: commit: %w", err)
 	}
 
-	return fmt.Sprintf("Contest %q started (id=%d). All strikes reset.", name, id), nil
+	return fmt.Sprintf("Contest %q started (id=%d).", name, id), nil
 }
 
 // FinishContest deactivates the active contest, but only while its current
@@ -244,7 +252,7 @@ func (e *Engine) FinishContest(ctx context.Context) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	contestID, err := e.activeContestID(ctx, e.db)
+	contestID, err := activeContestID(ctx, e.db)
 	if err != nil {
 		return "", err
 	}
@@ -264,9 +272,10 @@ func (e *Engine) FinishContest(ctx context.Context) (string, error) {
 }
 
 // StartWeek opens songs_collection for a new week: requires an active
-// contest and at least 2 eligible participants, picks a random unused
-// topic, snapshots the required-participant set, and announces the topic
-// (R6, R11).
+// contest and at least 2 obligated participants, picks a topic from the
+// contest's associated subset, and announces the topic (R6, R11). Required
+// participants come directly from contest_participants -- no per-week
+// roster snapshot is needed.
 func (e *Engine) StartWeek(ctx context.Context) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -277,7 +286,7 @@ func (e *Engine) StartWeek(ctx context.Context) (string, error) {
 	}
 	defer tx.Rollback()
 
-	contestID, err := e.activeContestID(ctx, tx)
+	contestID, err := activeContestID(ctx, tx)
 	if err != nil {
 		return "", err
 	}
@@ -291,40 +300,26 @@ func (e *Engine) StartWeek(ctx context.Context) (string, error) {
 	}
 
 	var eligibleCount int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM participants WHERE active = 1`).Scan(&eligibleCount); err != nil {
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM contest_participants WHERE contest_id = ? AND left_at IS NULL
+	`, contestID).Scan(&eligibleCount); err != nil {
 		return "", fmt.Errorf("contest: count eligible participants: %w", err)
 	}
 	if eligibleCount < minEligibleParticipants {
 		return "", ErrNotEnoughEligible
 	}
 
-	topicID, topicText, err := e.pickUnusedTopic(ctx, tx, contestID)
+	topicID, topicText, err := pickTopic(ctx, tx, contestID)
 	if err != nil {
 		return "", err
 	}
 
 	now := time.Now().In(madridLocation)
-	res, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO weeks (contest_id, state, topic_id, state_started_at)
 		VALUES (?, ?, ?, ?)
-	`, contestID, StateSongsCollection, topicID, now.Format(time.RFC3339))
-	if err != nil {
+	`, contestID, StateSongsCollection, topicID, now.Format(time.RFC3339)); err != nil {
 		return "", fmt.Errorf("contest: insert week: %w", err)
-	}
-	weekID, err := res.LastInsertId()
-	if err != nil {
-		return "", fmt.Errorf("contest: read new week id: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO topic_usage (contest_id, topic_id, used) VALUES (?, ?, 1)
-		ON CONFLICT (contest_id, topic_id) DO UPDATE SET used = 1
-	`, contestID, topicID); err != nil {
-		return "", fmt.Errorf("contest: mark topic used: %w", err)
-	}
-
-	if err := e.snapshotRequiredParticipants(ctx, tx, weekID); err != nil {
-		return "", err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -335,63 +330,13 @@ func (e *Engine) StartWeek(ctx context.Context) (string, error) {
 	return fmt.Sprintf("Songs collection open! Topic: %q. Submit by %s.", topicText, deadline.Format("Mon 2 Jan 15:04")), nil
 }
 
-func (e *Engine) pickUnusedTopic(ctx context.Context, tx *sql.Tx, contestID int64) (int64, string, error) {
-	row := tx.QueryRowContext(ctx, `
-		SELECT t.id, t.text FROM topics t
-		WHERE t.id NOT IN (
-			SELECT topic_id FROM topic_usage WHERE contest_id = ? AND used = 1
-		)
-		ORDER BY RANDOM() LIMIT 1
-	`, contestID)
-
-	var id int64
-	var text string
-	err := row.Scan(&id, &text)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, "", ErrNoTopicsAvailable
-	}
-	if err != nil {
-		return 0, "", fmt.Errorf("contest: pick unused topic: %w", err)
-	}
-	return id, text, nil
-}
-
-func (e *Engine) snapshotRequiredParticipants(ctx context.Context, tx *sql.Tx, weekID int64) error {
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM participants WHERE active = 1`)
-	if err != nil {
-		return fmt.Errorf("contest: list eligible participants: %w", err)
-	}
-	defer rows.Close()
-
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("contest: scan participant id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO week_participants (week_id, participant_id) VALUES (?, ?)
-		`, weekID, id); err != nil {
-			return fmt.Errorf("contest: snapshot participant %d: %w", id, err)
-		}
-	}
-	return nil
-}
-
 // ModifyLimit overrides the current state's deadline (in days from its
 // start), applying only to whichever state is currently open (R8).
 func (e *Engine) ModifyLimit(ctx context.Context, days int) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	contestID, err := e.activeContestID(ctx, e.db)
+	contestID, err := activeContestID(ctx, e.db)
 	if err != nil {
 		return "", err
 	}
@@ -422,7 +367,7 @@ func (e *Engine) ForceAdvance(ctx context.Context) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	contestID, err := e.activeContestID(ctx, e.db)
+	contestID, err := activeContestID(ctx, e.db)
 	if err != nil {
 		return "", err
 	}
