@@ -296,8 +296,8 @@ func TestHandleFixSubmission_NoActiveWeek_Rejected(t *testing.T) {
 
 	app.handleFixSubmission(context.Background(), nil, adminMessageUpdate("/fixsubmission @user0 https://youtu.be/fixed"))
 
-	if !strings.Contains(*lastText, "no active week") {
-		t.Errorf("lastText = %q, want it to mention no active week", *lastText)
+	if !strings.Contains(*lastText, "only be fixed while songs are being collected") {
+		t.Errorf("lastText = %q, want it to mention submissions can only be fixed during songs_collection", *lastText)
 	}
 }
 
@@ -336,8 +336,8 @@ func TestHandleRemoveSubmission_NoActiveWeek_Rejected(t *testing.T) {
 
 	app.handleRemoveSubmission(context.Background(), nil, adminMessageUpdate("/removesubmission @user0"))
 
-	if !strings.Contains(*lastText, "no active week") {
-		t.Errorf("lastText = %q, want it to mention no active week", *lastText)
+	if !strings.Contains(*lastText, "only be removed while songs are being collected") {
+		t.Errorf("lastText = %q, want it to mention submissions can only be removed during songs_collection", *lastText)
 	}
 }
 

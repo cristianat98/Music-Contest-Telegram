@@ -81,8 +81,9 @@ func TestHandleChatMemberUpdate_LeftThenRejoined_OneRow(t *testing.T) {
 		NewChatMember: memberChatMember(555, models.ChatMemberTypeMember),
 	})
 
-	if _, err := app.DB.Exec("UPDATE participants SET strikes = 2 WHERE telegram_user_id = ?", 555); err != nil {
-		t.Fatalf("seed strikes: %v", err)
+	var firstID int64
+	if err := app.DB.QueryRow("SELECT id FROM participants WHERE telegram_user_id = ?", 555).Scan(&firstID); err != nil {
+		t.Fatalf("query participant id: %v", err)
 	}
 
 	app.handleChatMemberUpdate(ctx, &models.ChatMemberUpdated{
@@ -100,12 +101,12 @@ func TestHandleChatMemberUpdate_LeftThenRejoined_OneRow(t *testing.T) {
 		t.Fatalf("expected exactly 1 row for rejoined participant, got %d", count)
 	}
 
-	var strikes int
-	if err := app.DB.QueryRow("SELECT strikes FROM participants WHERE telegram_user_id = ?", 555).Scan(&strikes); err != nil {
-		t.Fatalf("query strikes: %v", err)
+	var secondID int64
+	if err := app.DB.QueryRow("SELECT id FROM participants WHERE telegram_user_id = ?", 555).Scan(&secondID); err != nil {
+		t.Fatalf("query participant id: %v", err)
 	}
-	if strikes != 2 {
-		t.Errorf("strikes = %d, want 2 (preserved across leave/rejoin)", strikes)
+	if secondID != firstID {
+		t.Errorf("participant id = %d, want %d (same roster row preserved across leave/rejoin)", secondID, firstID)
 	}
 }
 
@@ -126,6 +127,54 @@ func TestHandleChatMemberUpdate_Left_MarksInactive(t *testing.T) {
 	}
 	if active {
 		t.Error("expected participant to be marked inactive after leaving")
+	}
+}
+
+func TestHandleChatMemberUpdate_Left_FlipsContestParticipantForActiveContest(t *testing.T) {
+	app := openTestAppWithContest(t)
+	ctx := context.Background()
+	seedActiveSongsCollection(t, app, 555, 556)
+
+	var contestID, participantID int64
+	if err := app.DB.QueryRow("SELECT id FROM contests WHERE active = 1").Scan(&contestID); err != nil {
+		t.Fatalf("query active contest: %v", err)
+	}
+	if err := app.DB.QueryRow("SELECT id FROM participants WHERE telegram_user_id = 555").Scan(&participantID); err != nil {
+		t.Fatalf("query participant id: %v", err)
+	}
+
+	app.handleChatMemberUpdate(ctx, &models.ChatMemberUpdated{
+		NewChatMember: memberChatMember(555, models.ChatMemberTypeLeft),
+	})
+
+	var leftAt sql.NullString
+	if err := app.DB.QueryRow(
+		"SELECT left_at FROM contest_participants WHERE contest_id = ? AND participant_id = ?", contestID, participantID,
+	).Scan(&leftAt); err != nil {
+		t.Fatalf("query contest_participants: %v", err)
+	}
+	if !leftAt.Valid || leftAt.String == "" {
+		t.Error("expected contest_participants.left_at to be set on leave")
+	}
+}
+
+func TestHandleChatMemberUpdate_Left_NoActiveContest_NoOp(t *testing.T) {
+	app := openTestApp(t)
+	ctx := context.Background()
+
+	app.handleChatMemberUpdate(ctx, &models.ChatMemberUpdated{
+		NewChatMember: memberChatMember(888, models.ChatMemberTypeMember),
+	})
+	app.handleChatMemberUpdate(ctx, &models.ChatMemberUpdated{
+		NewChatMember: memberChatMember(888, models.ChatMemberTypeLeft),
+	})
+
+	var count int
+	if err := app.DB.QueryRow("SELECT COUNT(*) FROM contest_participants").Scan(&count); err != nil {
+		t.Fatalf("count contest_participants: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("contest_participants row count = %d, want 0 (no active contest to flip)", count)
 	}
 }
 

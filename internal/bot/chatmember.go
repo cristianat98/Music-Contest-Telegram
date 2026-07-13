@@ -6,6 +6,8 @@ import (
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+
+	"github.com/cristianat98/Music-Contest-Telegram/internal/contest"
 )
 
 // activeStatus reports whether a chat member status counts as currently
@@ -62,15 +64,30 @@ func displayName(u *models.User) string {
 	return u.FirstName
 }
 
+// upsertParticipant keeps the global Telegram-roster row in sync. When a
+// participant transitions to inactive, it also flips their
+// contest_participants row for whichever contest is currently active (R3) --
+// a no-op if no contest is active, they're unknown, or they aren't enrolled
+// in it. This covers both the live chat_member event path
+// (handleChatMemberUpdate) and the /syncparticipants reconciliation path
+// (refreshKnownParticipants), since both call upsertParticipant.
 func (a *App) upsertParticipant(ctx context.Context, telegramUserID int64, name string, active bool) error {
-	_, err := a.DB.ExecContext(ctx, `
+	if _, err := a.DB.ExecContext(ctx, `
 		INSERT INTO participants (telegram_user_id, display_name, active)
 		VALUES (?, ?, ?)
 		ON CONFLICT (telegram_user_id) DO UPDATE SET
 			display_name = excluded.display_name,
 			active = excluded.active
-	`, telegramUserID, name, active)
-	return err
+	`, telegramUserID, name, active); err != nil {
+		return err
+	}
+
+	if !active {
+		if err := contest.SetParticipantLeft(ctx, a.DB, telegramUserID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // handleSyncParticipants reconciles the local roster against Telegram's live

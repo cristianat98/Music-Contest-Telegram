@@ -28,18 +28,17 @@ func NewSongsHooks(db *sql.DB) *SongsHooks {
 }
 
 func (h *SongsHooks) CloseSongsCollection(ctx context.Context, tx *sql.Tx, weekID int64, forced bool) error {
-	if forced {
-		if err := strikeMissingSubmitters(ctx, tx, weekID); err != nil {
-			return err
-		}
-	}
+	// No strike bookkeeping needed here even when forced: a missing
+	// submissions row for an obligated participant is already a permanent,
+	// computable fact once songs_collection closes (R7, R9) -- see
+	// StrikesForParticipant in participants.go.
 
-	// Assign display_order here, inside the same transaction that closes
-	// songs_collection, rather than waiting for the separate
-	// PublishDueSongs outbox processing: OpenResultsCollection (called
-	// right after this, in the same advance()) enqueues the questionnaire/
-	// ranking prompts, and those need display_order to already exist or
-	// PendingQuizSubmissions/PendingRankingSubmissions would scan NULL.
+	// Assign display_name (shuffle position) here, inside the same
+	// transaction that closes songs_collection, rather than waiting for the
+	// separate PublishDueSongs outbox processing: OpenResultsCollection
+	// (called right after this, in the same advance()) enqueues the
+	// questionnaire/ranking prompts, and those need display_name to already
+	// exist or PendingQuizSubmissions/PendingRankingSubmissions would scan NULL.
 	if err := ensureDisplayOrderAssigned(ctx, tx, weekID); err != nil {
 		return err
 	}
@@ -56,65 +55,31 @@ func (h *SongsHooks) CloseSongsCollection(ctx context.Context, tx *sql.Tx, weekI
 	return nil
 }
 
+// SongsCollectionComplete reports whether every obligated participant in
+// this week's contest has submitted (KTD6: required set now comes from
+// contest_participants, not a per-week roster).
 func (h *SongsHooks) SongsCollectionComplete(ctx context.Context, db *sql.DB, weekID int64) (bool, error) {
 	var total, submitted int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM week_participants WHERE week_id = ?`, weekID).Scan(&total); err != nil {
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM contest_participants cp
+		JOIN weeks w ON w.contest_id = cp.contest_id
+		WHERE w.id = ? AND cp.left_at IS NULL
+	`, weekID).Scan(&total); err != nil {
 		return false, fmt.Errorf("contest: count required participants: %w", err)
 	}
 	if total == 0 {
 		return false, nil
 	}
 	err := db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM week_participants wp
-		JOIN submissions s ON s.week_id = wp.week_id AND s.participant_id = wp.participant_id
-		WHERE wp.week_id = ?
+		SELECT COUNT(*) FROM contest_participants cp
+		JOIN weeks w ON w.contest_id = cp.contest_id
+		JOIN submissions s ON s.week_id = w.id AND s.participant_id = cp.participant_id
+		WHERE w.id = ? AND cp.left_at IS NULL
 	`, weekID).Scan(&submitted)
 	if err != nil {
 		return false, fmt.Errorf("contest: count submissions: %w", err)
 	}
 	return submitted >= total, nil
-}
-
-// strikeMissingSubmitters records a strike (R20) for any required
-// participant who hasn't submitted by the time songs_collection closes,
-// guarded by submission_struck so a defensive re-run can't double-strike.
-func strikeMissingSubmitters(ctx context.Context, tx *sql.Tx, weekID int64) error {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT wp.participant_id FROM week_participants wp
-		WHERE wp.week_id = ? AND wp.submission_struck = 0 AND NOT EXISTS (
-			SELECT 1 FROM submissions s WHERE s.week_id = wp.week_id AND s.participant_id = wp.participant_id
-		)
-	`, weekID)
-	if err != nil {
-		return fmt.Errorf("contest: list missing submitters: %w", err)
-	}
-	defer rows.Close()
-
-	var missing []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("contest: scan missing submitter: %w", err)
-		}
-		missing = append(missing, id)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	for _, participantID := range missing {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE week_participants SET submission_struck = 1 WHERE week_id = ? AND participant_id = ?
-		`, weekID, participantID); err != nil {
-			return fmt.Errorf("contest: mark submission_struck for %d: %w", participantID, err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE participants SET strikes = strikes + 1 WHERE id = ?
-		`, participantID); err != nil {
-			return fmt.Errorf("contest: increment strikes for %d: %w", participantID, err)
-		}
-	}
-	return nil
 }
 
 // submissionRow is a row from submissions joined with its topic-less data
@@ -163,8 +128,8 @@ func processPublishSongsAction(ctx context.Context, db *sql.DB, notifier GroupNo
 		text += fmt.Sprintf("%d. %s\n", i+1, url)
 	}
 
-	// Re-render from the now-persisted display_order on retry rather than
-	// tracking a separate idempotency key: display_order is assigned once
+	// Re-render from the now-persisted display_name on retry rather than
+	// tracking a separate idempotency key: display_name is assigned once
 	// and reused, so a resend renders byte-identical content -- never a
 	// duplicate or divergent side effect (resolves doc-review finding A2 on
 	// outbox idempotency for Telegram sends). The stable order also gives
@@ -181,17 +146,17 @@ func processPublishSongsAction(ctx context.Context, db *sql.DB, notifier GroupNo
 	return nil
 }
 
-// ensureDisplayOrderAssigned shuffles and persists a stable display_order
-// for a week's submissions, but only the first time it's called for that
-// week -- a retry sees every row already assigned and is a no-op, which is
-// what makes the published numbering (and the ranking buttons built on it)
-// stable across outbox retries.
+// ensureDisplayOrderAssigned shuffles and persists a stable display_name
+// (shuffle position) for a week's submissions, but only the first time it's
+// called for that week -- a retry sees every row already assigned and is a
+// no-op, which is what makes the published numbering (and the ranking
+// buttons built on it) stable across outbox retries.
 func ensureDisplayOrderAssigned(ctx context.Context, q querier, weekID int64) error {
 	var unassigned int
 	if err := q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM submissions WHERE week_id = ? AND display_order IS NULL
+		SELECT COUNT(*) FROM submissions WHERE week_id = ? AND display_name IS NULL
 	`, weekID).Scan(&unassigned); err != nil {
-		return fmt.Errorf("contest: count unassigned display_order: %w", err)
+		return fmt.Errorf("contest: count unassigned display_name: %w", err)
 	}
 	if unassigned == 0 {
 		return nil
@@ -218,9 +183,9 @@ func ensureDisplayOrderAssigned(ctx context.Context, q querier, weekID int64) er
 
 	for i, id := range ids {
 		if _, err := q.ExecContext(ctx, `
-			UPDATE submissions SET display_order = ? WHERE id = ?
+			UPDATE submissions SET display_name = ? WHERE id = ?
 		`, i+1, id); err != nil {
-			return fmt.Errorf("contest: assign display_order for submission %d: %w", id, err)
+			return fmt.Errorf("contest: assign display_name for submission %d: %w", id, err)
 		}
 	}
 	return nil
@@ -228,7 +193,7 @@ func ensureDisplayOrderAssigned(ctx context.Context, q querier, weekID int64) er
 
 func orderedSubmissionURLs(ctx context.Context, db *sql.DB, weekID int64) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT url FROM submissions WHERE week_id = ? ORDER BY display_order
+		SELECT url FROM submissions WHERE week_id = ? ORDER BY display_name
 	`, weekID)
 	if err != nil {
 		return nil, fmt.Errorf("contest: list submissions for publish: %w", err)

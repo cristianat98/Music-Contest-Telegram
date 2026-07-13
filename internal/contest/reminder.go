@@ -71,10 +71,11 @@ func songsCollectionWeekForReminder(ctx context.Context, db *sql.DB) (int64, sql
 
 func missingSubmitterNames(ctx context.Context, db *sql.DB, weekID int64) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT p.display_name FROM week_participants wp
-		JOIN participants p ON p.id = wp.participant_id
-		WHERE wp.week_id = ? AND NOT EXISTS (
-			SELECT 1 FROM submissions s WHERE s.week_id = wp.week_id AND s.participant_id = wp.participant_id
+		SELECT p.display_name FROM contest_participants cp
+		JOIN weeks w ON w.contest_id = cp.contest_id
+		JOIN participants p ON p.id = cp.participant_id
+		WHERE w.id = ? AND cp.left_at IS NULL AND NOT EXISTS (
+			SELECT 1 FROM submissions s WHERE s.week_id = w.id AND s.participant_id = cp.participant_id
 		)
 	`, weekID)
 	if err != nil {

@@ -59,6 +59,17 @@ classDiagram
         +SetSongsHooks(h)
         +SetResultsHooks(h)
     }
+    class contest_participants_go {
+        <<file: participants.go>>
+        +StrikesForParticipant(ctx, db, contestID, participantID) int, error
+        +SetParticipantLeft(ctx, db, telegramUserID) error
+        -enrollContestParticipants(ctx, tx, contestID) error
+    }
+    class contest_topics_go {
+        <<file: topics.go>>
+        -associateDefaultTopic(ctx, tx, contestID) error
+        -pickTopic(ctx, tx, contestID) int64, string, error
+    }
     class SongsCollectionHooks {
         <<interface>>
         +CloseSongsCollection(ctx, tx, weekID, forced) error
@@ -100,10 +111,60 @@ classDiagram
 
     contest_Engine --> SongsCollectionHooks : delegates songs_collection close
     contest_Engine --> ResultsCollectionHooks : delegates results_collection open/close
+    contest_Engine --> contest_participants_go : enrolls participants at StartContest
+    contest_Engine --> contest_topics_go : picks/associates topics at StartContest/StartWeek
     SongsHooks ..|> SongsCollectionHooks : implements
     ResultsHooks ..|> ResultsCollectionHooks : implements
     SongsHooks --> GroupNotifier : publish_songs outbox
     ResultsHooks --> ResultsNotifier : publish_results / partial-notice outbox
+    bot_App --> contest_participants_go : SetParticipantLeft on Telegram leave (chatmember.go)
+```
+
+## Data model
+
+`contest_participants` replaces the old `week_participants` roster: enrollment
+is per-contest, snapshotted once at `/startcontest`, not re-snapshotted per
+week. Strikes are never stored -- `StrikesForParticipant` derives them from
+`weeks`/`submissions`/`votes`/`quiz_answers` against each participant's
+obligation window. Topic eligibility (`topic_usage.selectable`) is the direct,
+renamed successor to the old `used` column -- still a stored per-association
+flag, not derived, since it needs to flip and repeat-fallback rather than only
+ever grow.
+
+```mermaid
+erDiagram
+    CONTESTS ||--o{ CONTEST_PARTICIPANTS : enrolls
+    PARTICIPANTS ||--o{ CONTEST_PARTICIPANTS : "enrolled in"
+    CONTESTS ||--o{ WEEKS : has
+    CONTESTS ||--o{ TOPIC_USAGE : "draws from"
+    TOPICS ||--o{ TOPIC_USAGE : "assigned to"
+    WEEKS ||--o| TOPICS : uses
+    WEEKS ||--o{ SUBMISSIONS : collects
+    PARTICIPANTS ||--o{ SUBMISSIONS : submits
+    WEEKS ||--o{ VOTES : records
+    PARTICIPANTS ||--o{ VOTES : casts
+    SUBMISSIONS ||--o{ VOTES : "ranked by"
+    WEEKS ||--o{ QUIZ_ANSWERS : records
+    PARTICIPANTS ||--o{ QUIZ_ANSWERS : answers
+    SUBMISSIONS ||--o{ QUIZ_ANSWERS : "asked about"
+
+    CONTEST_PARTICIPANTS {
+        int contest_id
+        int participant_id
+        datetime left_at
+    }
+    TOPIC_USAGE {
+        int contest_id
+        int topic_id
+        bool selectable
+    }
+    SUBMISSIONS {
+        int id
+        int week_id
+        int participant_id
+        string url
+        int display_name
+    }
 ```
 
 ## Module boundaries
