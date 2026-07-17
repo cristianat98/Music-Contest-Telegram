@@ -172,6 +172,60 @@ func TestEarlyFinishNotice_NotEnqueuedWhenCompleteAfterDeadline(t *testing.T) {
 	}
 }
 
+// TestEarlyFinishNotice_ResultsPhase_NamesResultsNotSongs covers the
+// results_collection half of AE1: the songs-phase test above only
+// exercises OutboxActionSongsEarlyFinish, so this proves the parallel
+// OutboxActionResultsEarlyFinish path enqueues and drains with the
+// correct "results" phase name rather than silently reusing "songs".
+func TestEarlyFinishNotice_ResultsPhase_NamesResultsNotSongs(t *testing.T) {
+	e, db, weekID, ids := setupResultsCollectionWeek(t, 2)
+	ctx := context.Background()
+
+	for _, p := range ids {
+		answerAllQuizzes(t, ctx, db, weekID, p, false)
+		rankAllRemaining(t, ctx, db, weekID, p)
+	}
+	// state_started_at for results_collection is left at "now" by
+	// setupResultsCollectionWeek's ForceAdvance transition, so the
+	// default deadline is still days away.
+
+	if err := e.Tick(ctx); err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+
+	var pendingCount int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM outbox_actions WHERE action_type = ? AND status = 'pending'", OutboxActionResultsEarlyFinish,
+	).Scan(&pendingCount); err != nil {
+		t.Fatalf("query pending early-finish rows: %v", err)
+	}
+	if pendingCount != 1 {
+		t.Fatalf("pending %s rows = %d, want 1", OutboxActionResultsEarlyFinish, pendingCount)
+	}
+
+	got, err := e.CurrentWeek(ctx)
+	if err != nil {
+		t.Fatalf("CurrentWeek() error = %v", err)
+	}
+	if got.State != StateResultsCollection {
+		t.Errorf("week state = %q, want %q (early finish must not publish)", got.State, StateResultsCollection)
+	}
+
+	notifier := &fakeNotifier{}
+	if err := ProcessEarlyFinishNotices(ctx, db, notifier); err != nil {
+		t.Fatalf("ProcessEarlyFinishNotices() error = %v", err)
+	}
+	if len(notifier.messages) != 1 {
+		t.Fatalf("messages sent = %d, want 1", len(notifier.messages))
+	}
+	if !strings.Contains(notifier.messages[0], "results") {
+		t.Errorf("message = %q, want it to name the results phase", notifier.messages[0])
+	}
+	if strings.Contains(notifier.messages[0], "songs") {
+		t.Errorf("message = %q, must not name the songs phase for a results-phase notice", notifier.messages[0])
+	}
+}
+
 func TestProcessEarlyFinishNotices_DBError(t *testing.T) {
 	_, db := openTestEngine(t)
 	db.Close()
