@@ -50,7 +50,11 @@ func (e *Engine) Tick(ctx context.Context) error {
 		return err
 	}
 	if time.Now().In(madridLocation).Before(deadline) {
-		return nil
+		actionType := OutboxActionSongsEarlyFinish
+		if w.state == StateResultsCollection {
+			actionType = OutboxActionResultsEarlyFinish
+		}
+		return enqueueEarlyFinishNotice(ctx, e.db, actionType, w.id, deadline)
 	}
 
 	_, err = e.advance(ctx, w, false)

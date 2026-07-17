@@ -82,6 +82,9 @@ func runTick(ctx context.Context, app *bot.App) {
 	if err := contest.PublishDueSongs(ctx, app.DB, app); err != nil {
 		log.Printf("tick: publish songs error: %v", err)
 	}
+	if err := contest.ProcessEarlyFinishNotices(ctx, app.DB, app); err != nil {
+		log.Printf("tick: early-finish notices error: %v", err)
+	}
 	if err := app.ProcessResultsPrompts(ctx); err != nil {
 		log.Printf("tick: results prompts error: %v", err)
 	}
