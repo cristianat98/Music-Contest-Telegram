@@ -22,10 +22,10 @@ stateDiagram-v2
 Strikes are never reset -- they're computed per contest from
 `contest_participants`/`weeks`/`submissions`/`votes`/`quiz_answers`, so a new
 contest naturally starts at zero without any explicit reset step. When a
-participant leaves the Telegram group, `contest_participants.active` flips
-false for whichever contest is active (R3): they stop blocking week
-completion and their contribution is zeroed/marked in results, without
-erasing what they already did.
+participant leaves the Telegram group, `participants.active` flips false and
+`contest_participants.left_at` is set for whichever contest is active (R3):
+they stop blocking week completion and their contribution is zeroed/marked
+in results, without erasing what they already did.
 
 ## Tick (every 15 minutes, plus once on startup)
 
@@ -74,7 +74,7 @@ flowchart TB
   MoreQuiz -->|yes| FirstQuiz
   MoreQuiz -->|no| FirstRank[bot sends remaining-songs ranking buttons]
   FirstRank --> RankPick[Participant picks next favorite]
-  RankPick --> RecordRank["contest.RecordRankingPick: rank = count+1, points = required-rank+1"]
+  RankPick --> RecordRank["contest.RecordRankingPick: stores rank = count+1 only"]
   RecordRank --> MoreRank{Songs left to rank?}
   MoreRank -->|yes| FirstRank
   MoreRank -->|no| Done[Participant done: questionnaire + ranking complete]
@@ -82,9 +82,8 @@ flowchart TB
   CheckAllDone -->|no| WaitR[Wait; incompleteness only becomes a strike at close]
   CheckAllDone -->|yes| CloseNatural[CloseResultsCollection forced=false]
   AdminForce["/forceadvance"] --> CloseForced["CloseResultsCollection forced=true: discard incomplete\nranking, queue partial-notice (no strike write --\nthe gap is already a computable strike)"]
-  CloseForced --> Disqualify
-  CloseNatural --> Disqualify[disqualifyOverfamiliarSongs: zero points for songs known by >=3, no redistribution]
-  Disqualify --> EnqueuePublish[Enqueue publish_results]
-  EnqueuePublish --> Announce["bot posts per-song points + familiarity outcome, de-anonymized\n(a departed submitter's song shows 0 points + a\n\"left the contest\" marker instead of its real score)"]
+  CloseForced --> EnqueuePublish[Enqueue publish_results]
+  CloseNatural --> EnqueuePublish
+  EnqueuePublish --> Announce["FinalResults derives each song's points from its votes' rank\n(zeroed for a song known by >=3 beforehand, no redistribution;\nzeroed for a departed submitter's song instead of its real score),\nthen the bot posts them de-anonymized"]
   Announce --> Idle[week returns to idle]
 ```

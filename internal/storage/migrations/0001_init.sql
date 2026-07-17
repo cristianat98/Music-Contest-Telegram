@@ -87,13 +87,16 @@ CREATE TABLE submissions (
     UNIQUE (week_id, participant_id)
 );
 
+-- points aren't stored: a vote's points are fully derivable from its rank
+-- and its voter's required-ranking count (itself derivable from
+-- submissions), so storing them would just be the same fact twice. See
+-- submissionPoints in results.go, which computes them at read time.
 CREATE TABLE votes (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     week_id        INTEGER NOT NULL REFERENCES weeks (id),
     voter_id       INTEGER NOT NULL REFERENCES participants (id),
     submission_id  INTEGER NOT NULL REFERENCES submissions (id),
     rank           INTEGER NOT NULL,
-    points         INTEGER NOT NULL DEFAULT 0,
     UNIQUE (week_id, voter_id, submission_id)
 );
 

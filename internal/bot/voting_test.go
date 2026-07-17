@@ -41,14 +41,32 @@ func TestHandleRankingPickCallback_RecordsAndAdvancesToCompletion(t *testing.T) 
 		t.Errorf("vote count = %d, want 1", voteCount)
 	}
 
-	var points int
+	var rank int
 	if err := app.DB.QueryRow(
-		"SELECT points FROM votes WHERE week_id = ? AND voter_id = ?", weekID, participantIDs[0],
-	).Scan(&points); err != nil {
-		t.Fatalf("query points: %v", err)
+		"SELECT rank FROM votes WHERE week_id = ? AND voter_id = ?", weekID, participantIDs[0],
+	).Scan(&rank); err != nil {
+		t.Fatalf("query rank: %v", err)
 	}
-	if points != 1 {
-		t.Errorf("points = %d, want 1 (the only song in a 1-song ranking)", points)
+	if rank != 1 {
+		t.Errorf("rank = %d, want 1 (the only song in a 1-song ranking)", rank)
+	}
+
+	results, err := contest.FinalResults(ctx, app.DB, weekID)
+	if err != nil {
+		t.Fatalf("FinalResults() error = %v", err)
+	}
+	var votedURL string
+	if err := app.DB.QueryRow("SELECT url FROM submissions WHERE id = ?", pendingRanking[0].ID).Scan(&votedURL); err != nil {
+		t.Fatalf("query voted submission url: %v", err)
+	}
+	var gotPoints int
+	for _, r := range results {
+		if r.URL == votedURL {
+			gotPoints = r.Points
+		}
+	}
+	if gotPoints != 1 {
+		t.Errorf("points = %d, want 1 (the only song in a 1-song ranking)", gotPoints)
 	}
 }
 

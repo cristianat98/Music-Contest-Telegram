@@ -50,10 +50,11 @@ type ResultsNotifier interface {
 }
 
 // ResultsHooks implements ResultsCollectionHooks: dispatching the initial
-// questionnaire/ranking prompts (R21), computing completion (R24), scoring
-// and disqualification (R23, R27), discarding-and-notifying incomplete
-// sessions on a forced close (R24, R25), and striking anyone not done
-// (R28).
+// questionnaire/ranking prompts (R21), computing completion (R24),
+// discarding-and-notifying incomplete sessions on a forced close (R24, R25),
+// and striking anyone not done (R28). Scoring and disqualification (R23,
+// R27) aren't a close-time side effect here -- FinalResults derives them at
+// read time instead.
 type ResultsHooks struct {
 	db *sql.DB
 }
@@ -167,10 +168,6 @@ func (h *ResultsHooks) CloseResultsCollection(ctx context.Context, tx *sql.Tx, w
 		}
 	}
 
-	if err := disqualifyOverfamiliarSongs(ctx, tx, weekID); err != nil {
-		return err
-	}
-
 	payload, err := json.Marshal(map[string]any{"week_id": weekID})
 	if err != nil {
 		return fmt.Errorf("contest: marshal publish_results payload: %w", err)
@@ -237,44 +234,6 @@ func discardParticipant(ctx context.Context, tx *sql.Tx, weekID, participantID i
 	return nil
 }
 
-// disqualifyOverfamiliarSongs implements R27: a song known by
-// disqualifyThreshold (3) or more participants beforehand has its voting
-// points zeroed, with no redistribution to other songs, and no further
-// penalty to its submitter.
-func disqualifyOverfamiliarSongs(ctx context.Context, tx *sql.Tx, weekID int64) error {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT submission_id, COUNT(*) FROM quiz_answers
-		WHERE week_id = ? AND already_knew = 1
-		GROUP BY submission_id
-		HAVING COUNT(*) >= ?
-	`, weekID, disqualifyThreshold)
-	if err != nil {
-		return fmt.Errorf("contest: find overfamiliar songs: %w", err)
-	}
-	var submissionIDs []int64
-	for rows.Next() {
-		var id int64
-		var count int
-		if err := rows.Scan(&id, &count); err != nil {
-			rows.Close()
-			return fmt.Errorf("contest: scan overfamiliar song: %w", err)
-		}
-		submissionIDs = append(submissionIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	for _, id := range submissionIDs {
-		if _, err := tx.ExecContext(ctx, `UPDATE votes SET points = 0 WHERE submission_id = ?`, id); err != nil {
-			return fmt.Errorf("contest: zero points for disqualified submission %d: %w", id, err)
-		}
-	}
-	return nil
-}
-
 // SubmissionResult is one song's final standing for the results
 // announcement: its submitter, total points, familiarity outcome, and
 // whether the submitter had no obligations in the contest by the time
@@ -290,15 +249,20 @@ type SubmissionResult struct {
 }
 
 // FinalResults computes the per-song results for a week: total points
-// (after disqualification zeroing), how many participants already knew
+// (derived from every vote cast for a song, zero for a disqualified or
+// departed submitter's song instead), how many participants already knew
 // each song, the submitter's name (results de-anonymize submitters, unlike
 // the songs_collection publication, since points must be attributed to
 // someone), and whether the submitter has since departed the contest
-// (R5, R26).
+// (R5, R26, R27).
 func FinalResults(ctx context.Context, db *sql.DB, weekID int64) ([]SubmissionResult, error) {
+	points, err := submissionPoints(ctx, db, weekID)
+	if err != nil {
+		return nil, err
+	}
+
 	rows, err := db.QueryContext(ctx, `
 		SELECT s.id, s.url, p.display_name,
-			COALESCE((SELECT SUM(v.points) FROM votes v WHERE v.submission_id = s.id), 0),
 			(SELECT COUNT(*) FROM quiz_answers q WHERE q.submission_id = s.id AND q.already_knew = 1),
 			CASE WHEN cp.left_at IS NULL THEN 0 ELSE 1 END
 		FROM submissions s
@@ -317,12 +281,12 @@ func FinalResults(ctx context.Context, db *sql.DB, weekID int64) ([]SubmissionRe
 	for rows.Next() {
 		var submissionID int64
 		var r SubmissionResult
-		if err := rows.Scan(&submissionID, &r.URL, &r.SubmitterName, &r.Points, &r.KnownCount, &r.Departed); err != nil {
+		if err := rows.Scan(&submissionID, &r.URL, &r.SubmitterName, &r.KnownCount, &r.Departed); err != nil {
 			return nil, fmt.Errorf("contest: scan final result row: %w", err)
 		}
 		r.Disqualified = r.KnownCount >= disqualifyThreshold
-		if r.Departed {
-			r.Points = 0
+		if !r.Disqualified && !r.Departed {
+			r.Points = points[submissionID]
 		}
 		results = append(results, r)
 	}
@@ -334,8 +298,65 @@ func FinalResults(ctx context.Context, db *sql.DB, weekID int64) ([]SubmissionRe
 	return results, nil
 }
 
-// RequiredVoteCount is requiredVoteCount, exported for the bot package's
-// voting/questionnaire flows to compute a ranking pick's points.
+// submissionPoints computes each submission's total points for a week by
+// summing every vote cast for it, converting each vote's rank into points
+// via that voter's own required-ranking count (R22, R23: required down to
+// 1). Points are derived here rather than stored on votes, since they're a
+// pure function of rank plus data (submissions) that already exists --
+// storing them would just duplicate the same fact (see votes' schema
+// comment).
+func submissionPoints(ctx context.Context, db *sql.DB, weekID int64) (map[int64]int, error) {
+	var total int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM submissions WHERE week_id = ?`, weekID).Scan(&total); err != nil {
+		return nil, fmt.Errorf("contest: count submissions for scoring: %w", err)
+	}
+
+	submitters := make(map[int64]bool)
+	subRows, err := db.QueryContext(ctx, `SELECT participant_id FROM submissions WHERE week_id = ?`, weekID)
+	if err != nil {
+		return nil, fmt.Errorf("contest: list submitters for scoring: %w", err)
+	}
+	for subRows.Next() {
+		var participantID int64
+		if err := subRows.Scan(&participantID); err != nil {
+			subRows.Close()
+			return nil, fmt.Errorf("contest: scan submitter for scoring: %w", err)
+		}
+		submitters[participantID] = true
+	}
+	if err := subRows.Err(); err != nil {
+		subRows.Close()
+		return nil, err
+	}
+	subRows.Close()
+
+	rows, err := db.QueryContext(ctx, `SELECT voter_id, submission_id, rank FROM votes WHERE week_id = ?`, weekID)
+	if err != nil {
+		return nil, fmt.Errorf("contest: list votes for scoring: %w", err)
+	}
+	defer rows.Close()
+
+	points := make(map[int64]int)
+	for rows.Next() {
+		var voterID, submissionID int64
+		var rank int
+		if err := rows.Scan(&voterID, &submissionID, &rank); err != nil {
+			return nil, fmt.Errorf("contest: scan vote for scoring: %w", err)
+		}
+		required := total
+		if submitters[voterID] {
+			required--
+		}
+		votePoints := required - rank + 1
+		if votePoints < 0 {
+			votePoints = 0
+		}
+		points[submissionID] += votePoints
+	}
+	return points, rows.Err()
+}
+
+// RequiredVoteCount is requiredVoteCount, exported for tests.
 func RequiredVoteCount(ctx context.Context, db *sql.DB, weekID, participantID int64) (int, error) {
 	return requiredVoteCount(ctx, db, weekID, participantID)
 }
@@ -407,14 +428,9 @@ func RecordQuizAnswer(ctx context.Context, db *sql.DB, weekID, participantID, su
 }
 
 // RecordRankingPick stores a participant's next ranking pick, assigning the
-// next sequential rank and its points (R22, R23: 5 down to 1 when ranking 5
-// songs, generalized to requiredVoteCount down to 1 for any count).
+// next sequential rank (R22). Its points aren't computed here: submissionPoints
+// derives them from rank at read time instead.
 func RecordRankingPick(ctx context.Context, db *sql.DB, weekID, participantID, submissionID int64) error {
-	required, err := requiredVoteCount(ctx, db, weekID, participantID)
-	if err != nil {
-		return err
-	}
-
 	var alreadyRanked int
 	if err := db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM votes WHERE week_id = ? AND voter_id = ?
@@ -423,14 +439,10 @@ func RecordRankingPick(ctx context.Context, db *sql.DB, weekID, participantID, s
 	}
 
 	rank := alreadyRanked + 1
-	points := required - rank + 1
-	if points < 0 {
-		points = 0
-	}
 
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO votes (week_id, voter_id, submission_id, rank, points) VALUES (?, ?, ?, ?, ?)
-	`, weekID, participantID, submissionID, rank, points); err != nil {
+		INSERT INTO votes (week_id, voter_id, submission_id, rank) VALUES (?, ?, ?, ?)
+	`, weekID, participantID, submissionID, rank); err != nil {
 		return fmt.Errorf("contest: record ranking pick: %w", err)
 	}
 	return nil

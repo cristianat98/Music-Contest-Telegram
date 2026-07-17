@@ -129,7 +129,12 @@ week. Strikes are never stored -- `StrikesForParticipant` derives them from
 obligation window. Topic eligibility (`topic_usage.selectable`) is the direct,
 renamed successor to the old `used` column -- still a stored per-association
 flag, not derived, since it needs to flip and repeat-fallback rather than only
-ever grow.
+ever grow. `votes` stores only `rank`, not points: a vote's points are a pure
+function of its rank and its voter's required-ranking count, so
+`submissionPoints` derives them at read time instead of storing the same fact
+twice; disqualification (a song known by 3+ beforehand) is applied the same
+way, by zeroing a submission's points in `FinalResults` rather than mutating
+`votes` when results close.
 
 ```mermaid
 erDiagram
@@ -164,6 +169,20 @@ erDiagram
         int participant_id
         string url
         int display_name
+    }
+    VOTES {
+        int id
+        int week_id
+        int voter_id
+        int submission_id
+        int rank
+    }
+    QUIZ_ANSWERS {
+        int id
+        int week_id
+        int participant_id
+        int submission_id
+        bool already_knew
     }
 ```
 

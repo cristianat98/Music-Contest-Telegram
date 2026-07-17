@@ -121,15 +121,24 @@ func TestRankingAndScoring_PointsDescendingByRank(t *testing.T) {
 		t.Fatalf("RecordRankingPick() #2 error = %v", err)
 	}
 
-	var firstPoints, secondPoints int
-	db.QueryRow("SELECT points FROM votes WHERE week_id = ? AND voter_id = ? AND submission_id = ?", weekID, ids[0], pending[0].ID).Scan(&firstPoints)
-	db.QueryRow("SELECT points FROM votes WHERE week_id = ? AND voter_id = ? AND submission_id = ?", weekID, ids[0], pending[1].ID).Scan(&secondPoints)
-
-	if firstPoints != 2 {
-		t.Errorf("first pick points = %d, want 2 (top of a 2-song ranking)", firstPoints)
+	results, err := FinalResults(ctx, db, weekID)
+	if err != nil {
+		t.Fatalf("FinalResults() error = %v", err)
 	}
-	if secondPoints != 1 {
-		t.Errorf("second pick points = %d, want 1", secondPoints)
+	pointsByURL := make(map[string]int)
+	for _, r := range results {
+		pointsByURL[r.URL] = r.Points
+	}
+
+	var firstURL, secondURL string
+	db.QueryRow("SELECT url FROM submissions WHERE id = ?", pending[0].ID).Scan(&firstURL)
+	db.QueryRow("SELECT url FROM submissions WHERE id = ?", pending[1].ID).Scan(&secondURL)
+
+	if pointsByURL[firstURL] != 2 {
+		t.Errorf("first pick points = %d, want 2 (top of a 2-song ranking)", pointsByURL[firstURL])
+	}
+	if pointsByURL[secondURL] != 1 {
+		t.Errorf("second pick points = %d, want 1", pointsByURL[secondURL])
 	}
 }
 
@@ -502,9 +511,10 @@ func TestDiscardAndStrikeParticipant_TxError(t *testing.T) {
 	}
 }
 
-func TestDisqualifyOverfamiliarSongs_TxError(t *testing.T) {
+func TestSubmissionPoints_DBError(t *testing.T) {
 	_, db := openTestEngine(t)
-	if err := disqualifyOverfamiliarSongs(context.Background(), committedTx(t, db), 1); err == nil {
-		t.Error("disqualifyOverfamiliarSongs() error = nil, want an error from the finalized tx")
+	db.Close()
+	if _, err := submissionPoints(context.Background(), db, 1); err == nil {
+		t.Error("submissionPoints() error = nil, want an error from the closed DB")
 	}
 }
