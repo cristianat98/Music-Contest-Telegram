@@ -208,11 +208,24 @@ func (e *Engine) CurrentWeek(ctx context.Context) (WeekInfo, error) {
 // StartContest deactivates any previously active contest and activates a
 // new one, enrolling every currently-active participant into it (R1) and
 // associating the seeded default topic so its catalog is never empty (R16).
-// Strikes need no reset: they're computed per-contest from contest_participants
-// and week data, never stored (R9).
-func (e *Engine) StartContest(ctx context.Context, name string) (string, error) {
+// phaseDays optionally configures the contest's songs-phase and
+// results-phase durations (R1, R2), in that order -- a variadic tail rather
+// than two required params so every existing two-arg call site (mostly
+// tests seeding a bare contest) keeps compiling unchanged. A nil entry, or
+// an omitted one, leaves that phase's column NULL, meaning "use
+// DefaultDeadlineDays" (R3). Strikes need no reset: they're computed
+// per-contest from contest_participants and week data, never stored (R9).
+func (e *Engine) StartContest(ctx context.Context, name string, phaseDays ...*int) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	var songsDays, resultsDays *int
+	if len(phaseDays) > 0 {
+		songsDays = phaseDays[0]
+	}
+	if len(phaseDays) > 1 {
+		resultsDays = phaseDays[1]
+	}
 
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -223,7 +236,9 @@ func (e *Engine) StartContest(ctx context.Context, name string) (string, error) 
 	if _, err := tx.ExecContext(ctx, `UPDATE contests SET active = 0 WHERE active = 1`); err != nil {
 		return "", fmt.Errorf("contest: deactivate previous contest: %w", err)
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO contests (name, active) VALUES (?, 1)`, name)
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO contests (name, active, songs_deadline_days, results_deadline_days) VALUES (?, 1, ?, ?)
+	`, name, songsDays, resultsDays)
 	if err != nil {
 		return "", fmt.Errorf("contest: insert new contest: %w", err)
 	}
@@ -243,7 +258,17 @@ func (e *Engine) StartContest(ctx context.Context, name string) (string, error) 
 		return "", fmt.Errorf("contest: commit: %w", err)
 	}
 
-	return fmt.Sprintf("Contest %q started (id=%d).", name, id), nil
+	resolvedSongs, resolvedResults := DefaultDeadlineDays, DefaultDeadlineDays
+	if songsDays != nil {
+		resolvedSongs = *songsDays
+	}
+	if resultsDays != nil {
+		resolvedResults = *resultsDays
+	}
+	return fmt.Sprintf(
+		"Contest %q started (id=%d). Songs phase: %d day(s). Results phase: %d day(s).",
+		name, id, resolvedSongs, resolvedResults,
+	), nil
 }
 
 // FinishContest deactivates the active contest, but only while its current

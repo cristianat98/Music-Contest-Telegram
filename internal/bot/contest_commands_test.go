@@ -92,6 +92,81 @@ func TestHandleStartContest_Success(t *testing.T) {
 	}
 }
 
+func TestParseContestDurationArgs(t *testing.T) {
+	cases := []struct {
+		args               string
+		wantName           string
+		wantSongs, wantRes *int
+	}{
+		{"Season 2 3 5", "Season 2", intPtr(3), intPtr(5)},                             // KTD3: both trailing tokens parse -> durations
+		{"Season 2", "Season 2", nil, nil},                                             // no trailing numbers at all
+		{"Top 40", "Top 40", nil, nil},                                                 // single trailing digit stays part of the name
+		{"Season 2 0 5", "Season 2", intPtr(0), intPtr(5)},                             // recognized as durations; positivity validated by the caller (KTD5)
+		{"Eurovision Special 10 2026", "Eurovision Special", intPtr(10), intPtr(2026)}, // KTD3's documented limitation: a name ending in two integers is silently parsed as durations
+	}
+	for _, c := range cases {
+		name, songs, res := parseContestDurationArgs(c.args)
+		if name != c.wantName {
+			t.Errorf("parseContestDurationArgs(%q) name = %q, want %q", c.args, name, c.wantName)
+		}
+		if !intPtrEqual(songs, c.wantSongs) {
+			t.Errorf("parseContestDurationArgs(%q) songsDays = %v, want %v", c.args, derefOrNil(songs), derefOrNil(c.wantSongs))
+		}
+		if !intPtrEqual(res, c.wantRes) {
+			t.Errorf("parseContestDurationArgs(%q) resultsDays = %v, want %v", c.args, derefOrNil(res), derefOrNil(c.wantRes))
+		}
+	}
+}
+
+func intPtr(n int) *int { return &n }
+
+func intPtrEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func derefOrNil(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func TestHandleStartContest_WithDurations_EchoesBackAndPersists(t *testing.T) {
+	app, lastText := setupCommandApp(t, 0)
+	app.handleStartContest(context.Background(), app.TG, messageUpdate(1, -100, "/startcontest Season 2 3 5"))
+	if !strings.Contains(*lastText, "3") || !strings.Contains(*lastText, "5") {
+		t.Errorf("lastText = %q, want it to echo back both resolved durations", *lastText)
+	}
+
+	var songsDays, resultsDays int
+	if err := app.DB.QueryRow(
+		"SELECT songs_deadline_days, results_deadline_days FROM contests WHERE name = ?", "Season 2",
+	).Scan(&songsDays, &resultsDays); err != nil {
+		t.Fatalf("query contest durations: %v", err)
+	}
+	if songsDays != 3 || resultsDays != 5 {
+		t.Errorf("stored durations = (%d, %d), want (3, 5)", songsDays, resultsDays)
+	}
+}
+
+func TestHandleStartContest_NonPositiveDuration_UsageMessage_NoRowInserted(t *testing.T) {
+	app, lastText := setupCommandApp(t, 0)
+	app.handleStartContest(context.Background(), app.TG, messageUpdate(1, -100, "/startcontest Season 2 0 5"))
+	if !strings.Contains(*lastText, "Usage") {
+		t.Errorf("lastText = %q, want it to mention Usage", *lastText)
+	}
+	var count int
+	if err := app.DB.QueryRow("SELECT COUNT(*) FROM contests").Scan(&count); err != nil {
+		t.Fatalf("count contests: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("contests row count = %d, want 0 (rejected before insert)", count)
+	}
+}
+
 func TestHandleFinishContest_WeekNotIdle_Error(t *testing.T) {
 	app, lastText := setupCommandApp(t, 2)
 	ctx := context.Background()
