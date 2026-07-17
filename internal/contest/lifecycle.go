@@ -326,7 +326,11 @@ func (e *Engine) StartWeek(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("contest: commit: %w", err)
 	}
 
-	deadline := Deadline(now, nil)
+	defaultDays, err := contestPhaseDefaultDays(ctx, e.db, contestID, StateSongsCollection)
+	if err != nil {
+		return "", err
+	}
+	deadline := Deadline(now, nil, defaultDays)
 	return fmt.Sprintf("Songs collection open! Topic: %q. Submit by %s.", topicText, deadline.Format("Mon 2 Jan 15:04")), nil
 }
 
@@ -356,7 +360,11 @@ func (e *Engine) ModifyLimit(ctx context.Context, days int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("contest: parse state_started_at: %w", err)
 	}
-	deadline := Deadline(started, &days)
+	defaultDays, err := contestPhaseDefaultDays(ctx, e.db, contestID, w.state)
+	if err != nil {
+		return "", err
+	}
+	deadline := Deadline(started, &days, defaultDays)
 	return fmt.Sprintf("Deadline for the current state updated to %s.", deadline.Format("Mon 2 Jan 15:04")), nil
 }
 
