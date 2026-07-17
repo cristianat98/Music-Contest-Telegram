@@ -35,3 +35,23 @@ func ListPendingOutboxActions(ctx context.Context, db *sql.DB, actionType string
 	}
 	return actions, rows.Err()
 }
+
+// markOutboxInProgress and markOutboxDone are the two status-transition
+// steps every outbox consumer (publish_songs, publish_results,
+// results_partial_notice, songs/results_early_finish) performs identically
+// around its own send logic.
+func markOutboxInProgress(ctx context.Context, db *sql.DB, actionID int64) error {
+	if _, err := db.ExecContext(ctx, `UPDATE outbox_actions SET status = 'in_progress' WHERE id = ?`, actionID); err != nil {
+		return fmt.Errorf("contest: mark outbox action %d in_progress: %w", actionID, err)
+	}
+	return nil
+}
+
+func markOutboxDone(ctx context.Context, db *sql.DB, actionID int64) error {
+	if _, err := db.ExecContext(ctx, `
+		UPDATE outbox_actions SET status = 'done', completed_at = datetime('now') WHERE id = ?
+	`, actionID); err != nil {
+		return fmt.Errorf("contest: mark outbox action %d done: %w", actionID, err)
+	}
+	return nil
+}

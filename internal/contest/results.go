@@ -304,13 +304,13 @@ func FinalResults(ctx context.Context, db *sql.DB, weekID int64) ([]SubmissionRe
 // 1). Points are derived here rather than stored on votes, since they're a
 // pure function of rank plus data (submissions) that already exists --
 // storing them would just duplicate the same fact (see votes' schema
-// comment).
+// comment). Computes the same "total submissions, minus one if the voter
+// has their own" required-count formula as requiredVoteCount, but inline
+// against a pre-fetched submitters map rather than calling it per vote --
+// requiredVoteCount is per-participant (used by participantDone's
+// completion check) and would mean one query per vote row here instead of
+// one query for the whole week.
 func submissionPoints(ctx context.Context, db *sql.DB, weekID int64) (map[int64]int, error) {
-	var total int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM submissions WHERE week_id = ?`, weekID).Scan(&total); err != nil {
-		return nil, fmt.Errorf("contest: count submissions for scoring: %w", err)
-	}
-
 	submitters := make(map[int64]bool)
 	subRows, err := db.QueryContext(ctx, `SELECT participant_id FROM submissions WHERE week_id = ?`, weekID)
 	if err != nil {
@@ -329,6 +329,9 @@ func submissionPoints(ctx context.Context, db *sql.DB, weekID int64) (map[int64]
 		return nil, err
 	}
 	subRows.Close()
+	// submissions has UNIQUE(week_id, participant_id), so this count is the
+	// same total requiredVoteCount would query separately.
+	total := len(submitters)
 
 	rows, err := db.QueryContext(ctx, `SELECT voter_id, submission_id, rank FROM votes WHERE week_id = ?`, weekID)
 	if err != nil {
@@ -473,8 +476,8 @@ func processPublishResultsAction(ctx context.Context, db *sql.DB, notifier Resul
 		return fmt.Errorf("contest: unmarshal publish_results payload: %w", err)
 	}
 
-	if _, err := db.ExecContext(ctx, `UPDATE outbox_actions SET status = 'in_progress' WHERE id = ?`, actionID); err != nil {
-		return fmt.Errorf("contest: mark publish_results in_progress: %w", err)
+	if err := markOutboxInProgress(ctx, db, actionID); err != nil {
+		return err
 	}
 
 	results, err := FinalResults(ctx, db, payload.WeekID)
@@ -500,12 +503,7 @@ func processPublishResultsAction(ctx context.Context, db *sql.DB, notifier Resul
 		return fmt.Errorf("contest: send publish_results message: %w", err)
 	}
 
-	if _, err := db.ExecContext(ctx, `
-		UPDATE outbox_actions SET status = 'done', completed_at = datetime('now') WHERE id = ?
-	`, actionID); err != nil {
-		return fmt.Errorf("contest: mark publish_results done: %w", err)
-	}
-	return nil
+	return markOutboxDone(ctx, db, actionID)
 }
 
 // ProcessPartialNotices processes pending results_partial_notice outbox
@@ -534,8 +532,8 @@ func processPartialNoticeAction(ctx context.Context, db *sql.DB, notifier Result
 		return fmt.Errorf("contest: unmarshal partial notice payload: %w", err)
 	}
 
-	if _, err := db.ExecContext(ctx, `UPDATE outbox_actions SET status = 'in_progress' WHERE id = ?`, actionID); err != nil {
-		return fmt.Errorf("contest: mark partial notice in_progress: %w", err)
+	if err := markOutboxInProgress(ctx, db, actionID); err != nil {
+		return err
 	}
 
 	var telegramUserID int64
@@ -550,10 +548,5 @@ func processPartialNoticeAction(ctx context.Context, db *sql.DB, notifier Result
 		return fmt.Errorf("contest: send partial notice: %w", err)
 	}
 
-	if _, err := db.ExecContext(ctx, `
-		UPDATE outbox_actions SET status = 'done', completed_at = datetime('now') WHERE id = ?
-	`, actionID); err != nil {
-		return fmt.Errorf("contest: mark partial notice done: %w", err)
-	}
-	return nil
+	return markOutboxDone(ctx, db, actionID)
 }

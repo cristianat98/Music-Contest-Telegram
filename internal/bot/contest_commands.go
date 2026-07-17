@@ -47,11 +47,11 @@ func (a *App) handleStartContest(ctx context.Context, b *tgbot.Bot, update *mode
 		return
 	}
 
+	// parseContestDurationArgs never returns an empty name here: args is
+	// already non-empty and whitespace-trimmed (checked above), so
+	// strings.Fields(args) always yields at least one token on every
+	// return path.
 	name, songsDays, resultsDays := parseContestDurationArgs(args)
-	if name == "" {
-		a.reply(ctx, update.Message.Chat.ID, "Usage: /startcontest <name> [songsDays resultsDays]")
-		return
-	}
 	if (songsDays != nil && *songsDays < 1) || (resultsDays != nil && *resultsDays < 1) {
 		a.reply(ctx, update.Message.Chat.ID, "Usage: /startcontest <name> [songsDays resultsDays] (both must be positive integers, day 1 = the day the phase opened)")
 		return

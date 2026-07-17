@@ -122,38 +122,10 @@ func TestTick_SongsCollectionComplete_AdvancesToResultsCollection(t *testing.T) 
 // publishing on completion alone (R4).
 func TestTick_CompleteBeforeDeadline_DoesNotAdvance(t *testing.T) {
 	ctx := context.Background()
-	e, db := openTestEngine(t)
-	seedParticipants(t, db, 2)
-	seedTopic(t, db, "topic-a")
-	e.SetSongsHooks(NewSongsHooks(db))
-	e.SetResultsHooks(NewResultsHooks(db))
-
-	if _, err := e.StartContest(ctx, "Contest"); err != nil {
-		t.Fatalf("StartContest() error = %v", err)
-	}
-	if _, err := e.StartWeek(ctx); err != nil {
-		t.Fatalf("StartWeek() error = %v", err)
-	}
-
-	week, err := e.CurrentWeek(ctx)
-	if err != nil {
-		t.Fatalf("CurrentWeek() error = %v", err)
-	}
-
-	rows, _ := db.Query("SELECT id FROM participants ORDER BY id")
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		rows.Scan(&id)
-		ids = append(ids, id)
-	}
-	rows.Close()
-
-	for i, id := range ids {
-		seedSubmission(t, db, week.ID, id, fmt.Sprintf("https://youtu.be/song%d", i))
-	}
-	// state_started_at is left at "now" (the default DefaultDeadlineDays=4
-	// deadline is days away) -- everyone's submitted, but the phase isn't due.
+	// state_started_at is left at "now" by seedCompleteSongsWeek (the
+	// default DefaultDeadlineDays=4 deadline is days away) -- everyone's
+	// submitted, but the phase isn't due.
+	e, _, _ := seedCompleteSongsWeek(t)
 
 	if err := e.Tick(ctx); err != nil {
 		t.Fatalf("Tick() error = %v", err)
