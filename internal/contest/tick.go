@@ -45,8 +45,38 @@ func (e *Engine) Tick(ctx context.Context) error {
 		return nil
 	}
 
+	deadline, err := e.phaseDeadline(ctx, contestID, w)
+	if err != nil {
+		return err
+	}
+	if time.Now().In(madridLocation).Before(deadline) {
+		return nil
+	}
+
 	_, err = e.advance(ctx, w, false)
 	return err
+}
+
+// phaseDeadline computes the deadline for whichever phase w is currently
+// in: the contest's configured duration for that phase (or
+// DefaultDeadlineDays when unset, per contestPhaseDefaultDays), unless
+// /modifylimit set an override for the current state, which still takes
+// precedence exactly as before (R6).
+func (e *Engine) phaseDeadline(ctx context.Context, contestID int64, w *week) (time.Time, error) {
+	defaultDays, err := contestPhaseDefaultDays(ctx, e.db, contestID, w.state)
+	if err != nil {
+		return time.Time{}, err
+	}
+	started, err := time.Parse(time.RFC3339, w.stateStartedAt.String)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("contest: parse state_started_at: %w", err)
+	}
+	var override *int
+	if w.deadlineOverrideDays.Valid {
+		days := int(w.deadlineOverrideDays.Int64)
+		override = &days
+	}
+	return Deadline(started, override, defaultDays), nil
 }
 
 // advance performs the actual songs_collection->results_collection or

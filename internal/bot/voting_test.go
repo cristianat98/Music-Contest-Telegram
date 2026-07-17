@@ -120,6 +120,12 @@ func TestProcessResultsNotifications_PublishesOnceWeekComplete(t *testing.T) {
 		completeQuizAndRanking(t, ctx, app, weekID, pid)
 	}
 
+	// Backdate state_started_at so this phase's deadline has already
+	// passed -- Tick() now requires both completion and the deadline.
+	if _, err := app.DB.Exec(`UPDATE weeks SET state_started_at = ? WHERE id = ?`, "2000-01-01T00:00:00+01:00", weekID); err != nil {
+		t.Fatalf("backdate state_started_at: %v", err)
+	}
+
 	if err := app.Contest.Tick(ctx); err != nil {
 		t.Fatalf("Tick() error = %v", err)
 	}
