@@ -114,6 +114,34 @@ func TestOpen_ContestParticipantsColumns(t *testing.T) {
 	}
 }
 
+func TestOpen_ContestsColumns_PhaseDurationsNullable(t *testing.T) {
+	db := openTestDB(t)
+	for _, col := range []string{"songs_deadline_days", "results_deadline_days"} {
+		if !hasColumn(t, db, "contests", col) {
+			t.Errorf("contests.%s should exist after migration", col)
+		}
+	}
+
+	res, err := db.Exec("INSERT INTO contests (name, active) VALUES (?, ?)", "Legacy Contest", 0)
+	if err != nil {
+		t.Fatalf("insert contest without phase durations: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("last insert id: %v", err)
+	}
+
+	var songsDays, resultsDays sql.NullInt64
+	if err := db.QueryRow(
+		"SELECT songs_deadline_days, results_deadline_days FROM contests WHERE id = ?", id,
+	).Scan(&songsDays, &resultsDays); err != nil {
+		t.Fatalf("select phase durations: %v", err)
+	}
+	if songsDays.Valid || resultsDays.Valid {
+		t.Errorf("phase durations = (%v, %v), want both NULL for a contest inserted without them", songsDays, resultsDays)
+	}
+}
+
 func TestOpen_ReRunIsNoOp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 

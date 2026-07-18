@@ -114,8 +114,8 @@ func processPublishSongsAction(ctx context.Context, db *sql.DB, notifier GroupNo
 		return fmt.Errorf("contest: unmarshal publish_songs payload: %w", err)
 	}
 
-	if _, err := db.ExecContext(ctx, `UPDATE outbox_actions SET status = 'in_progress' WHERE id = ?`, actionID); err != nil {
-		return fmt.Errorf("contest: mark publish_songs in_progress: %w", err)
+	if err := markOutboxInProgress(ctx, db, actionID); err != nil {
+		return err
 	}
 
 	urls, err := orderedSubmissionURLs(ctx, db, payload.WeekID)
@@ -138,12 +138,7 @@ func processPublishSongsAction(ctx context.Context, db *sql.DB, notifier GroupNo
 		return fmt.Errorf("contest: send publish_songs message: %w", err)
 	}
 
-	if _, err := db.ExecContext(ctx, `
-		UPDATE outbox_actions SET status = 'done', completed_at = datetime('now') WHERE id = ?
-	`, actionID); err != nil {
-		return fmt.Errorf("contest: mark publish_songs done: %w", err)
-	}
-	return nil
+	return markOutboxDone(ctx, db, actionID)
 }
 
 // ensureDisplayOrderAssigned shuffles and persists a stable display_name

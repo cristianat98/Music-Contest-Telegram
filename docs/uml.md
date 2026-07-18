@@ -49,7 +49,7 @@ classDiagram
         -mu sync.Mutex
         -songsHooks SongsCollectionHooks
         -resultsHooks ResultsCollectionHooks
-        +StartContest(ctx, name) string, error
+        +StartContest(ctx, name, phaseDays...) string, error
         +FinishContest(ctx) string, error
         +StartWeek(ctx) string, error
         +ModifyLimit(ctx, days) string, error
@@ -129,7 +129,18 @@ week. Strikes are never stored -- `StrikesForParticipant` derives them from
 obligation window. Topic eligibility (`topic_usage.selectable`) is the direct,
 renamed successor to the old `used` column -- still a stored per-association
 flag, not derived, since it needs to flip and repeat-fallback rather than only
-ever grow.
+ever grow. `votes` stores only `rank`, not points: a vote's points are a pure
+function of its rank and its voter's required-ranking count, so
+`submissionPoints` derives them at read time instead of storing the same fact
+twice; disqualification (a song known by 3+ beforehand) is applied the same
+way, by zeroing a submission's points in `FinalResults` rather than mutating
+`votes` when results close. `contests.songs_deadline_days`/
+`results_deadline_days` hold each contest's configured phase durations,
+nullable so an unset value means "use `DefaultDeadlineDays`" via `COALESCE`
+at lookup time (`contestPhaseDefaultDays`) rather than needing a backfill
+migration for contests created before this existed; `weeks.deadline_override_days`
+(set by `/modifylimit`) still overrides that default for a single week's
+current phase, unchanged from before per-contest configuration existed.
 
 ```mermaid
 erDiagram
@@ -148,6 +159,13 @@ erDiagram
     PARTICIPANTS ||--o{ QUIZ_ANSWERS : answers
     SUBMISSIONS ||--o{ QUIZ_ANSWERS : "asked about"
 
+    CONTESTS {
+        int id
+        string name
+        bool active
+        int songs_deadline_days "nullable, NULL = DefaultDeadlineDays"
+        int results_deadline_days "nullable, NULL = DefaultDeadlineDays"
+    }
     CONTEST_PARTICIPANTS {
         int contest_id
         int participant_id
@@ -164,6 +182,20 @@ erDiagram
         int participant_id
         string url
         int display_name
+    }
+    VOTES {
+        int id
+        int week_id
+        int voter_id
+        int submission_id
+        int rank
+    }
+    QUIZ_ANSWERS {
+        int id
+        int week_id
+        int participant_id
+        int submission_id
+        bool already_knew
     }
 ```
 

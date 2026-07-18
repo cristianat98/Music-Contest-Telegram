@@ -21,14 +21,43 @@ func commandArgs(text string) string {
 	return strings.TrimSpace(parts[1])
 }
 
+// parseContestDurationArgs splits /startcontest's raw args into a name and,
+// only when the last two whitespace-separated tokens both parse as
+// integers, the songs/results phase durations (KTD3: both or neither -- a
+// lone trailing number stays part of the name, since one token alone can't
+// disambiguate a duration from a name that happens to end in a digit).
+// Positivity is validated separately by the caller (KTD5) so recognition
+// and validation stay independent steps.
+func parseContestDurationArgs(args string) (name string, songsDays, resultsDays *int) {
+	tokens := strings.Fields(args)
+	if len(tokens) >= 3 {
+		if s, errS := strconv.Atoi(tokens[len(tokens)-2]); errS == nil {
+			if r, errR := strconv.Atoi(tokens[len(tokens)-1]); errR == nil {
+				return strings.Join(tokens[:len(tokens)-2], " "), &s, &r
+			}
+		}
+	}
+	return strings.Join(tokens, " "), nil, nil
+}
+
 func (a *App) handleStartContest(ctx context.Context, b *tgbot.Bot, update *models.Update) {
-	name := commandArgs(update.Message.Text)
-	if name == "" {
-		a.reply(ctx, update.Message.Chat.ID, "Usage: /startcontest <name>")
+	args := commandArgs(update.Message.Text)
+	if args == "" {
+		a.reply(ctx, update.Message.Chat.ID, "Usage: /startcontest <name> [songsDays resultsDays]")
 		return
 	}
 
-	msg, err := a.Contest.StartContest(ctx, name)
+	// parseContestDurationArgs never returns an empty name here: args is
+	// already non-empty and whitespace-trimmed (checked above), so
+	// strings.Fields(args) always yields at least one token on every
+	// return path.
+	name, songsDays, resultsDays := parseContestDurationArgs(args)
+	if (songsDays != nil && *songsDays < 1) || (resultsDays != nil && *resultsDays < 1) {
+		a.reply(ctx, update.Message.Chat.ID, "Usage: /startcontest <name> [songsDays resultsDays] (both must be positive integers, day 1 = the day the phase opened)")
+		return
+	}
+
+	msg, err := a.Contest.StartContest(ctx, name, songsDays, resultsDays)
 	if err != nil {
 		a.reply(ctx, update.Message.Chat.ID, "Could not start contest: "+err.Error())
 		return

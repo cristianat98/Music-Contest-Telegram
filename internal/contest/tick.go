@@ -45,8 +45,45 @@ func (e *Engine) Tick(ctx context.Context) error {
 		return nil
 	}
 
+	var override *int
+	if w.deadlineOverrideDays.Valid {
+		days := int(w.deadlineOverrideDays.Int64)
+		override = &days
+	}
+	deadline, err := e.phaseDeadline(ctx, contestID, w.state, w.stateStartedAt.String, override)
+	if err != nil {
+		return err
+	}
+	if time.Now().In(madridLocation).Before(deadline) {
+		actionType := OutboxActionSongsEarlyFinish
+		if w.state == StateResultsCollection {
+			actionType = OutboxActionResultsEarlyFinish
+		}
+		return enqueueEarlyFinishNotice(ctx, e.db, actionType, w.id, deadline)
+	}
+
 	_, err = e.advance(ctx, w, false)
 	return err
+}
+
+// phaseDeadline computes the deadline for the given contest's phase
+// (state), starting at stateStartedAt (RFC3339): the contest's configured
+// duration for that phase (or DefaultDeadlineDays when unset, per
+// contestPhaseDefaultDays), unless override is non-nil, which still takes
+// precedence exactly as before (R6). Shared by Tick's natural-completion
+// check and ModifyLimit's override-preview message -- the only difference
+// between the two call sites is where the override comes from
+// (weeks.deadline_override_days vs. the command's argument).
+func (e *Engine) phaseDeadline(ctx context.Context, contestID int64, state, stateStartedAt string, override *int) (time.Time, error) {
+	defaultDays, err := contestPhaseDefaultDays(ctx, e.db, contestID, state)
+	if err != nil {
+		return time.Time{}, err
+	}
+	started, err := time.Parse(time.RFC3339, stateStartedAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("contest: parse state_started_at: %w", err)
+	}
+	return Deadline(started, override, defaultDays), nil
 }
 
 // advance performs the actual songs_collection->results_collection or
