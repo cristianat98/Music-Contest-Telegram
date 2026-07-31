@@ -1,0 +1,8 @@
+/bin/
+/dist/
+/docs/brainstorms/
+/docs/plans/
+*.db
+*.db-wal
+*.db-shm
+worktrees/
